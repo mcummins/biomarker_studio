@@ -812,10 +812,33 @@ def page_fitbit_data():
         st.stop()
 
     show_trend = True
-    force_full = bool(st.session_state.pop("fitbit_force_full_resync", False))
-
-    loading_placeholder = st.empty()
+    sync_mode = st.session_state.pop("fitbit_sync_mode", None)
+    force_full = sync_mode == "full"
     content_placeholder = st.empty()
+    loading_placeholder = st.empty()
+
+    fetch_steps = [
+        ("Weight", "fetch_weight", "weight"),
+        ("HRV", "fetch_hrv", "hrv"),
+        ("Resting Heart Rate", "fetch_rhr", "rhr"),
+        ("Breathing Rate", "fetch_breathing_rate", "breathing_rate"),
+        ("Sleep", "fetch_sleep", "sleep"),
+        ("Sleep Scores", "fetch_sleep_score", "sleep_score"),
+        ("Activity", "fetch_activity", "activity"),
+    ]
+
+    results = {
+        func_name: fitbit_client.load_cached_dataframe(metric_name)
+        for _, func_name, metric_name in fetch_steps
+    }
+    has_any_cache = any(not df.empty for df in results.values())
+    stale_labels = [
+        label for label, _, metric_name in fetch_steps
+        if not fitbit_client.is_cache_fresh(metric_name)
+    ]
+    auto_refresh = sync_mode is None and has_any_cache and len(stale_labels) > 0
+    if sync_mode is None and not has_any_cache:
+        sync_mode = "incremental"
 
     def fetch_fitbit_metric(label: str, func_name: str, metric_name: str, force_full: bool):
         try:
@@ -835,35 +858,6 @@ def page_fitbit_data():
             return pd.DataFrame(), f"{label}: live sync failed and no cached data is available ({e})"
 
     fetch_warnings = []
-    fetch_steps = [
-        ("Weight", "fetch_weight", "weight"),
-        ("HRV", "fetch_hrv", "hrv"),
-        ("Resting Heart Rate", "fetch_rhr", "rhr"),
-        ("Breathing Rate", "fetch_breathing_rate", "breathing_rate"),
-        ("Sleep", "fetch_sleep", "sleep"),
-        ("Sleep Scores", "fetch_sleep_score", "sleep_score"),
-        ("Activity", "fetch_activity", "activity"),
-    ]
-    results = {}
-    with loading_placeholder.container():
-        render_section_header(
-            "Loading Fitbit",
-            "Syncing Fitbit metrics now. The dashboard shell stays in place while fresh data loads.",
-            "Sync in progress",
-        )
-        progress_text = st.empty()
-        progress_bar = st.progress(0)
-        for label, func_name, metric_name in fetch_steps:
-            progress_text.caption(f"Fetching {label}...")
-            results[func_name], warning = fetch_fitbit_metric(
-                label, func_name, metric_name, force_full
-            )
-            if warning:
-                fetch_warnings.append(warning)
-            progress_bar.progress((len(results)) / len(fetch_steps))
-        progress_text.caption("Fitbit data loaded.")
-        progress_bar.progress(1.0)
-
     weight_df = results["fetch_weight"]
     hrv_df = results["fetch_hrv"]
     rhr_df = results["fetch_rhr"]
@@ -871,8 +865,15 @@ def page_fitbit_data():
     sleep_df = results["fetch_sleep"]
     sleep_score_df = results["fetch_sleep_score"]
     activity_df = results["fetch_activity"]
-    loading_placeholder.empty()
     with content_placeholder.container():
+        refresh_notice = st.session_state.pop("fitbit_refresh_notice", None)
+        if refresh_notice:
+            st.success(refresh_notice)
+        if auto_refresh:
+            stale_text = ", ".join(stale_labels[:3])
+            if len(stale_labels) > 3:
+                stale_text += ", and more"
+            st.info(f"Showing cached Fitbit data now while stale feeds refresh in the background: {stale_text}.")
         for warning in fetch_warnings:
             st.warning(warning)
 
@@ -1116,6 +1117,37 @@ def page_fitbit_data():
             else:
                 st.caption("No data.")
 
+    should_refresh = sync_mode is not None or auto_refresh
+    if should_refresh:
+        refreshed_results = {}
+        with loading_placeholder.container():
+            render_section_header(
+                "Loading Fitbit",
+                "Syncing Fitbit metrics now. The dashboard stays usable while fresh data is pulled in.",
+                "Sync in progress",
+            )
+            progress_text = st.empty()
+            progress_bar = st.progress(0)
+            for label, func_name, metric_name in fetch_steps:
+                progress_text.caption(f"Fetching {label}...")
+                refreshed_results[func_name], warning = fetch_fitbit_metric(
+                    label, func_name, metric_name, force_full
+                )
+                if warning:
+                    fetch_warnings.append(warning)
+                progress_bar.progress((len(refreshed_results)) / len(fetch_steps))
+            progress_text.caption("Fitbit data loaded.")
+            progress_bar.progress(1.0)
+
+        if sync_mode is not None:
+            st.session_state["fitbit_refresh_notice"] = "Fitbit data refreshed."
+            st.rerun()
+        if auto_refresh and not fetch_warnings:
+            st.session_state["fitbit_refresh_notice"] = "Fitbit data refreshed in the background."
+            st.rerun()
+        if fetch_warnings:
+            loading_placeholder.empty()
+
 
 def page_settings():
     """Settings page for data sources and Fitbit configuration."""
@@ -1218,13 +1250,12 @@ def page_settings():
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         if st.button("Sync latest Fitbit data"):
-            st.cache_data.clear()
-            st.success("Fitbit data will refresh the next time you open Fitbit Data.")
+            st.session_state["fitbit_sync_mode"] = "incremental"
+            st.success("The next Fitbit Data visit will refresh recent Fitbit data.")
     with col2:
         if st.button("Full Fitbit re-sync"):
-            st.session_state["fitbit_force_full_resync"] = True
-            st.cache_data.clear()
-            st.success("A full Fitbit history re-sync will run the next time you open Fitbit Data.")
+            st.session_state["fitbit_sync_mode"] = "full"
+            st.success("The next Fitbit Data visit will run a full Fitbit history sync.")
     with col3:
         if st.button("Clear cached data"):
             fitbit_client.clear_cache()

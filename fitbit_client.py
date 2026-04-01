@@ -279,6 +279,11 @@ def _cache_is_fresh(metric: str) -> bool:
     return age < CACHE_MAX_AGE_SECONDS
 
 
+def is_cache_fresh(metric: str) -> bool:
+    """Public helper for callers that need cache freshness state."""
+    return _cache_is_fresh(metric)
+
+
 def _load_cache(metric: str) -> List[Dict]:
     path = _cache_path(metric)
     if os.path.exists(path):
