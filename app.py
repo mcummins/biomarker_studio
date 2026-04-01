@@ -228,8 +228,13 @@ def load_groups_from_sheets(all_sheets: Dict[str, pd.DataFrame]) -> Dict[str, Li
         # minor header inconsistencies still appear in the category list.
         col_lookup = {str(col).strip().lower(): col for col in df.columns}
         test_col = col_lookup.get("test")
-        if test_col is not None:
-            tests = df[test_col].dropna().astype(str).str.strip()
+        # Fall back to the first column if "test" header is missing/blank
+        use_iloc = False
+        if test_col is None and len(df.columns) > 0 and str(df.columns[0]).strip() == "":
+            use_iloc = True
+        if test_col is not None or use_iloc:
+            col_data = df.iloc[:, 0] if use_iloc else df[test_col]
+            tests = col_data.dropna().astype(str).str.strip()
             tests = [t for t in tests.unique().tolist() if t]
             if len(tests) > 0:
                 groups[name] = tests
