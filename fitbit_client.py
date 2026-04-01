@@ -21,6 +21,9 @@ import requests
 FITBIT_AUTH_URL = "https://www.fitbit.com/oauth2/authorize"
 FITBIT_TOKEN_URL = "https://api.fitbit.com/oauth2/token"
 FITBIT_API_BASE = "https://api.fitbit.com"
+REQUEST_TIMEOUT = (10, 30)
+MAX_HTTP_RETRIES = 3
+MAX_RATE_LIMIT_WAIT_SECONDS = 300
 
 # Local cache directory
 CACHE_DIR = os.path.join(os.path.dirname(__file__), ".fitbit_cache")
@@ -89,6 +92,15 @@ def get_auth_url(client_id: str, redirect_uri: str = "http://localhost:8501") ->
     return url, code_verifier
 
 
+def _post_fitbit_token(data: Dict[str, Any]) -> requests.Response:
+    return requests.post(
+        FITBIT_TOKEN_URL,
+        data=data,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=REQUEST_TIMEOUT,
+    )
+
+
 def exchange_code_for_token(
     client_id: str,
     auth_code: str,
@@ -96,16 +108,14 @@ def exchange_code_for_token(
     redirect_uri: str = "http://localhost:8501",
 ) -> Dict[str, Any]:
     """Exchange authorization code for access + refresh tokens."""
-    resp = requests.post(
-        FITBIT_TOKEN_URL,
-        data={
+    resp = _post_fitbit_token(
+        {
             "client_id": client_id,
             "grant_type": "authorization_code",
             "code": auth_code,
             "redirect_uri": redirect_uri,
             "code_verifier": code_verifier,
-        },
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        }
     )
     resp.raise_for_status()
     token_data = resp.json()
@@ -130,14 +140,12 @@ def refresh_access_token() -> str:
     if not refresh_token or not client_id:
         raise ValueError("No refresh token available. Please re-authorize.")
 
-    resp = requests.post(
-        FITBIT_TOKEN_URL,
-        data={
+    resp = _post_fitbit_token(
+        {
             "client_id": client_id,
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
-        },
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        }
     )
     if resp.status_code == 400:
         error_data = resp.json() if resp.text else {}
@@ -180,36 +188,54 @@ def set_rate_limit_callback(cb):
 
 def _api_get(path: str, params: Optional[Dict] = None) -> Dict:
     """Make an authenticated GET request to the Fitbit API.
-    Automatically waits and retries on 429 (rate limit) and 5xx (server error).
+    Automatically waits and retries on rate limits, transient network failures,
+    and 5xx server errors, while keeping wait times bounded.
     """
     import time
 
     token = _get_access_token()
     retries = 0
-    max_retries = 3
+    rate_limit_retries = 0
+    auth_retry_done = False
     while True:
-        resp = requests.get(
-            f"{FITBIT_API_BASE}{path}",
-            params=params,
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        if resp.status_code == 401:
-            token = refresh_access_token()
+        try:
             resp = requests.get(
                 f"{FITBIT_API_BASE}{path}",
                 params=params,
                 headers={"Authorization": f"Bearer {token}"},
+                timeout=REQUEST_TIMEOUT,
             )
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+            if retries >= MAX_HTTP_RETRIES:
+                raise requests.exceptions.RequestException(
+                    f"Fitbit request failed after {MAX_HTTP_RETRIES} retries: {exc}"
+                ) from exc
+            retries += 1
+            wait = min(5 * retries, 30)
+            if _rate_limit_cb:
+                _rate_limit_cb(wait)
+            time.sleep(wait)
+            continue
+
+        if resp.status_code == 401:
+            if auth_retry_done:
+                resp.raise_for_status()
+            token = refresh_access_token()
+            auth_retry_done = True
+            continue
         if resp.status_code == 429:
+            if rate_limit_retries >= MAX_HTTP_RETRIES:
+                resp.raise_for_status()
             retry_after = int(resp.headers.get("Retry-After", 60))
+            retry_after = max(1, min(retry_after, MAX_RATE_LIMIT_WAIT_SECONDS))
             if _rate_limit_cb:
                 _rate_limit_cb(retry_after)
             time.sleep(retry_after)
-            retries = 0  # rate-limit waits don't count as retries
+            rate_limit_retries += 1
             continue
-        if resp.status_code >= 500 and retries < max_retries:
+        if resp.status_code >= 500 and retries < MAX_HTTP_RETRIES:
             retries += 1
-            wait = 5 * retries
+            wait = min(5 * retries, 30)
             if _rate_limit_cb:
                 _rate_limit_cb(wait)
             time.sleep(wait)
@@ -760,6 +786,23 @@ def _activity_records_to_df(records: List[Dict]) -> pd.DataFrame:
     if "MinutesFairlyActive" in df.columns and "MinutesVeryActive" in df.columns:
         df["ZoneMinutes"] = df["MinutesFairlyActive"] + df["MinutesVeryActive"]
     return df.sort_values("Date").reset_index(drop=True)
+
+
+def load_cached_dataframe(metric: str) -> pd.DataFrame:
+    """Return cached metric data as a dataframe, or an empty one if unavailable."""
+    records = _load_cache(metric)
+    converters = {
+        "weight": _weight_records_to_df,
+        "hrv": _hrv_records_to_df,
+        "rhr": _rhr_records_to_df,
+        "breathing_rate": _breathing_rate_records_to_df,
+        "sleep": _sleep_records_to_df,
+        "sleep_score": _sleep_score_records_to_df,
+        "activity": _activity_records_to_df,
+    }
+    if metric not in converters:
+        raise ValueError(f"Unsupported metric: {metric}")
+    return converters[metric](records)
 
 
 def clear_cache():

@@ -765,48 +765,54 @@ def page_fitbit_data():
 
         force_full = st.button("Full re-sync (all history)")
 
-    # Fetch data (cached locally — only pulls new days)
-    try:
-        fetch_warnings = []
-        fetch_steps = [
-            ("Weight", "fetch_weight"),
-            ("HRV", "fetch_hrv"),
-            ("Resting Heart Rate", "fetch_rhr"),
-            ("Breathing Rate", "fetch_breathing_rate"),
-            ("Sleep", "fetch_sleep"),
-            ("Sleep Scores", "fetch_sleep_score"),
-            ("Activity", "fetch_activity"),
-        ]
-        results = {}
-        with st.status("Loading Fitbit data...", expanded=False) as status:
-            for label, func_name in fetch_steps:
-                status.update(label=f"Fetching {label}...")
-                try:
-                    results[func_name] = getattr(fitbit_client, func_name)(
-                        force_full=force_full
-                    )
-                except requests.exceptions.HTTPError as e:
-                    if e.response is not None and e.response.status_code == 403:
-                        fetch_warnings.append(f"{label}: not available (403 Forbidden)")
-                        results[func_name] = pd.DataFrame()
-                    else:
-                        raise
-            status.update(label="Fitbit data loaded", state="complete")
+    def fetch_fitbit_metric(label: str, func_name: str, metric_name: str, force_full: bool):
+        try:
+            data = getattr(fitbit_client, func_name)(force_full=force_full)
+            return data, None
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 403:
+                return pd.DataFrame(), f"{label}: not available (403 Forbidden)"
+            cached = fitbit_client.load_cached_dataframe(metric_name)
+            if not cached.empty:
+                return cached, f"{label}: live sync failed, showing cached data ({e})"
+            return pd.DataFrame(), f"{label}: live sync failed and no cached data is available ({e})"
+        except Exception as e:
+            cached = fitbit_client.load_cached_dataframe(metric_name)
+            if not cached.empty:
+                return cached, f"{label}: live sync failed, showing cached data ({e})"
+            return pd.DataFrame(), f"{label}: live sync failed and no cached data is available ({e})"
 
-        weight_df = results["fetch_weight"]
-        hrv_df = results["fetch_hrv"]
-        rhr_df = results["fetch_rhr"]
-        br_df = results["fetch_breathing_rate"]
-        sleep_df = results["fetch_sleep"]
-        sleep_score_df = results["fetch_sleep_score"]
-        activity_df = results["fetch_activity"]
+    fetch_warnings = []
+    fetch_steps = [
+        ("Weight", "fetch_weight", "weight"),
+        ("HRV", "fetch_hrv", "hrv"),
+        ("Resting Heart Rate", "fetch_rhr", "rhr"),
+        ("Breathing Rate", "fetch_breathing_rate", "breathing_rate"),
+        ("Sleep", "fetch_sleep", "sleep"),
+        ("Sleep Scores", "fetch_sleep_score", "sleep_score"),
+        ("Activity", "fetch_activity", "activity"),
+    ]
+    results = {}
+    with st.status("Loading Fitbit data...", expanded=False) as status:
+        for label, func_name, metric_name in fetch_steps:
+            status.update(label=f"Fetching {label}...")
+            results[func_name], warning = fetch_fitbit_metric(
+                label, func_name, metric_name, force_full
+            )
+            if warning:
+                fetch_warnings.append(warning)
+        status.update(label="Fitbit data loaded", state="complete")
 
-        for w in fetch_warnings:
-            st.warning(w)
-    except Exception as e:
-        st.error(f"Failed to fetch Fitbit data: {e}")
-        st.caption("Try re-authorizing on the Fitbit Config page.")
-        st.stop()
+    weight_df = results["fetch_weight"]
+    hrv_df = results["fetch_hrv"]
+    rhr_df = results["fetch_rhr"]
+    br_df = results["fetch_breathing_rate"]
+    sleep_df = results["fetch_sleep"]
+    sleep_score_df = results["fetch_sleep_score"]
+    activity_df = results["fetch_activity"]
+
+    for warning in fetch_warnings:
+        st.warning(warning)
 
     # Merge sleep scores into sleep dataframe
     if not sleep_df.empty and not sleep_score_df.empty:
