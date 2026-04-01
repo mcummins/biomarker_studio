@@ -728,8 +728,13 @@ def page_blood_panel():
     st.sidebar.markdown('<hr class="sidebar-divider">', unsafe_allow_html=True)
     st.sidebar.markdown('<div class="section-header" style="border-bottom:none; margin-top:0.5rem; font-size:1.1rem;">Category</div>', unsafe_allow_html=True)
     default_group = "Inflamation"
-    default_index = group_names.index(default_group) if default_group in group_names else 0
-    grp = st.sidebar.selectbox("Category", options=group_names, index=default_index)
+    default_selection = default_group if default_group in group_names else group_names[0]
+    pending_category = st.session_state.pop("blood_panel_category_target", None)
+    if pending_category in group_names:
+        st.session_state["blood_panel_category"] = pending_category
+    if st.session_state.get("blood_panel_category") not in group_names:
+        st.session_state["blood_panel_category"] = default_selection
+    grp = st.sidebar.selectbox("Category", options=group_names, key="blood_panel_category")
     if grp != "(All)":
         selected_tests = groups.get(grp, [])
     else:
@@ -737,12 +742,24 @@ def page_blood_panel():
 
     hero_title = grp if grp != "(All)" else "Blood Panel"
     with hero_placeholder.container():
+        current_index = group_names.index(grp)
         render_page_hero(
             hero_title,
             "A polished view of your longitudinal lab results, reference ranges, and recent changes across every marker that matters.",
             pills=["Longitudinal trends", "Reference zones", "Consumer-grade detail"],
             eyebrow="Biomarker Studio",
         )
+        st.markdown("<div class='hero-nav-slot'>", unsafe_allow_html=True)
+        nav_col1, nav_col2, nav_col3 = st.columns([1.4, 1.4, 8])
+        with nav_col1:
+            if st.button("← Prev", key="blood_panel_prev_category", use_container_width=True, disabled=current_index == 0):
+                st.session_state["blood_panel_category_target"] = group_names[current_index - 1]
+                st.rerun()
+        with nav_col2:
+            if st.button("Next →", key="blood_panel_next_category", use_container_width=True, disabled=current_index == len(group_names) - 1):
+                st.session_state["blood_panel_category_target"] = group_names[current_index + 1]
+                st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
 
     with st.sidebar.expander("Filters", expanded=False):
         search = st.text_input("Search test name")
@@ -1650,6 +1667,21 @@ section[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] > label:has(i
     background: radial-gradient(circle, rgba(122, 157, 141, 0.24), rgba(122, 157, 141, 0));
 }
 
+.hero-nav-slot {
+    margin-top: -3.9rem;
+    margin-left: 2.2rem;
+    position: relative;
+    z-index: 4;
+}
+
+.hero-nav-slot .stButton > button {
+    min-height: 2.2rem;
+    padding: 0.4rem 0.8rem !important;
+    border-radius: 999px !important;
+    font-size: 0.88rem !important;
+    box-shadow: 0 8px 18px rgba(217, 107, 66, 0.16);
+}
+
 .stat-grid {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1817,6 +1849,11 @@ div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
 }
 
 @media (max-width: 980px) {
+    .hero-nav-slot {
+        margin-top: -2.2rem;
+        margin-left: 1.2rem;
+    }
+
     .stat-grid {
         grid-template-columns: 1fr;
     }
