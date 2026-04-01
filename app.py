@@ -19,7 +19,7 @@ import fitbit_client
 # -----------------------------
 # Config
 # -----------------------------
-EXCLUDE_SHEETS = {"All Data", "Optimal Ranges", "Graphs", "Labs and notes"}
+EXCLUDE_SHEETS = {"All Data", "Optimal Ranges", "Graphs", "Labs and notes", "NN Metabolic Scorecard"}
 DEFAULT_GROUP_SHEETS = []  # will be filled dynamically
 
 # -----------------------------
@@ -224,9 +224,13 @@ def load_groups_from_sheets(all_sheets: Dict[str, pd.DataFrame]) -> Dict[str, Li
     for name, df in all_sheets.items():
         if name in EXCLUDE_SHEETS:
             continue
-        # try to read tests listed in this tab
-        if "Test" in df.columns:
-            tests = df["Test"].dropna().astype(str).unique().tolist()
+        # Read the test list using a normalized header match so sheets with
+        # minor header inconsistencies still appear in the category list.
+        col_lookup = {str(col).strip().lower(): col for col in df.columns}
+        test_col = col_lookup.get("test")
+        if test_col is not None:
+            tests = df[test_col].dropna().astype(str).str.strip()
+            tests = [t for t in tests.unique().tolist() if t]
             if len(tests) > 0:
                 groups[name] = tests
     return groups
@@ -634,30 +638,25 @@ def page_blood_panel():
 
     # Groups
     groups = load_groups_from_sheets(sheets)
-    group_names = ["(All)"] + sorted(list(groups.keys()))
+    group_names = ["(All)"] + list(groups.keys())
     st.sidebar.markdown('<hr class="sidebar-divider">', unsafe_allow_html=True)
-    st.sidebar.markdown('<div class="section-header" style="border-bottom:none; margin-top:0.5rem; font-size:1.1rem;">Filters</div>', unsafe_allow_html=True)
+    st.sidebar.markdown('<div class="section-header" style="border-bottom:none; margin-top:0.5rem; font-size:1.1rem;">Category</div>', unsafe_allow_html=True)
     grp = st.sidebar.selectbox("Category", options=group_names)
     if grp != "(All)":
         selected_tests = groups.get(grp, [])
     else:
         selected_tests = sorted(merged["test"].unique().tolist())
 
-    # Search/select tests
-    search = st.sidebar.text_input("Search test name")
-    if search:
-        candidates = [t for t in selected_tests if search.lower() in t.lower()]
-    else:
-        candidates = selected_tests
+    with st.sidebar.expander("Filters", expanded=False):
+        search = st.text_input("Search test name")
+        if search:
+            candidates = [t for t in selected_tests if search.lower() in t.lower()]
+        else:
+            candidates = selected_tests
 
-    tests_selected = st.sidebar.multiselect("Select tests to visualize", options=candidates, default=candidates[:len(candidates)])
+        tests_selected = st.multiselect("Select tests to visualize", options=candidates, default=candidates[:len(candidates)])
 
-    # Date range filter
-    min_date = pd.to_datetime(merged["Date"].min())
-    max_date = pd.to_datetime(merged["Date"].max())
-    date_range = st.sidebar.slider("Date range", min_value=min_date.to_pydatetime(), max_value=max_date.to_pydatetime(), value=(min_date.to_pydatetime(), max_date.to_pydatetime()))
-    mask = (merged["Date"] >= pd.to_datetime(date_range[0])) & (merged["Date"] <= pd.to_datetime(date_range[1]))
-    data = merged[mask]
+    data = merged.copy()
 
     # Insights
     data = compute_deltas(data)
@@ -1346,6 +1345,21 @@ section[data-testid="stSidebar"] .stFileUploader section {
     background: rgba(255, 255, 255, 0.72) !important;
     border: 1px solid rgba(24, 50, 47, 0.1) !important;
     border-radius: 16px !important;
+}
+
+section[data-testid="stSidebar"] .stMultiSelect [data-baseweb="tag"] {
+    background: rgba(122, 157, 141, 0.16) !important;
+    border: 1px solid rgba(122, 157, 141, 0.26) !important;
+    border-radius: 999px !important;
+}
+
+section[data-testid="stSidebar"] .stMultiSelect [data-baseweb="tag"] * {
+    color: #35524c !important;
+    -webkit-text-fill-color: #35524c !important;
+}
+
+section[data-testid="stSidebar"] .stMultiSelect [data-baseweb="tag"] svg {
+    fill: #35524c !important;
 }
 
 section[data-testid="stSidebar"] .stRadio > div {
