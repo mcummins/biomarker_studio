@@ -286,17 +286,17 @@ def apply_warm_theme(fig: go.Figure) -> go.Figure:
     fig.update_layout(
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(family="Inter, sans-serif", color="#3D405B"),
+        font=dict(family="Manrope, sans-serif", color="#18322f"),
         hoverlabel=dict(
-            bgcolor="#3D405B",
+            bgcolor="#18322f",
             font_color="#FFFFFF",
             font_size=13,
-            font_family="Inter, sans-serif",
-            bordercolor="#3D405B",
+            font_family="Manrope, sans-serif",
+            bordercolor="#18322f",
         ),
     )
-    fig.update_xaxes(gridcolor="#F0E6D8", linecolor="#D4C5B5", zeroline=False)
-    fig.update_yaxes(gridcolor="#F0E6D8", linecolor="#D4C5B5", zeroline=False)
+    fig.update_xaxes(gridcolor="rgba(24, 50, 47, 0.08)", linecolor="rgba(24, 50, 47, 0.14)", zeroline=False)
+    fig.update_yaxes(gridcolor="rgba(24, 50, 47, 0.08)", linecolor="rgba(24, 50, 47, 0.14)", zeroline=False)
     return fig
 
 
@@ -510,20 +510,62 @@ def plot_fitbit_timeseries(df: pd.DataFrame, y_col: str, title: str,
     return fig
 
 
+def format_display_date(value, fmt: str = "%d %b %Y", empty: str = "No data") -> str:
+    if pd.isna(value):
+        return empty
+    return pd.to_datetime(value).strftime(fmt)
+
+
+def render_page_hero(title: str, subtitle: str, pills: Optional[List[str]] = None, eyebrow: str = "Health Atlas"):
+    st.markdown(
+        f"""
+        <section class="page-hero">
+            <div class="page-hero-copy">
+                <h1>{title}</h1>
+            </div>
+            <div class="hero-orb hero-orb-a"></div>
+            <div class="hero-orb hero-orb-b"></div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_section_header(title: str, subtitle: str = "", eyebrow: Optional[str] = None):
+    eyebrow_html = f"<div class='section-eyebrow'>{eyebrow}</div>" if eyebrow else ""
+    subtitle_html = f"<p>{subtitle}</p>" if subtitle else ""
+    st.markdown(
+        f"""
+        <div class="section-shell">
+            {eyebrow_html}
+            <div class="section-title">{title}</div>
+            {subtitle_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_chip_row(chips: List[str]):
+    chip_html = "".join(f"<span class='context-chip'>{chip}</span>" for chip in chips if chip)
+    if chip_html:
+        st.markdown(f"<div class='context-chip-row'>{chip_html}</div>", unsafe_allow_html=True)
+
+
 # =====================================================================
 # PAGE FUNCTIONS
 # =====================================================================
 
 def page_blood_panel():
     """Original Blood Panel Explorer page — all existing logic intact."""
-
-    st.markdown('<div class="hero-header">Blood Panel Explorer</div>', unsafe_allow_html=True)
-    st.markdown('<div class="hero-subtitle">Interactive visualization of your longitudinal lab results — reference ranges, trend analysis, and quick insights.</div>', unsafe_allow_html=True)
+    render_page_hero(
+        "Blood Panel",
+        "A polished view of your longitudinal lab results, reference ranges, and recent changes across every marker that matters.",
+        pills=["Longitudinal trends", "Reference zones", "Consumer-grade detail"],
+        eyebrow="Health Atlas",
+    )
 
     with st.sidebar:
-        st.markdown('<hr class="sidebar-divider">', unsafe_allow_html=True)
-        st.markdown('<div class="section-header" style="border-bottom:none; margin-top:0.5rem; font-size:1.1rem;">Data Source</div>', unsafe_allow_html=True)
-
         # Convenience: auto-load local sheet_api_key.json if present
         local_key_path = os.path.join(os.path.dirname(__file__), "sheet_api_key.json")
         sheets = None
@@ -536,7 +578,6 @@ def page_blood_panel():
                 default_sheet_url = "https://docs.google.com/spreadsheets/d/1pfYaK6t25gcKdBAUu8_geyGlQP6wp6px9IyNUKI4wdw/edit?usp=sharing"
                 spreadsheet_id = parse_spreadsheet_id(default_sheet_url)
 
-                st.caption(f"Using local key: `{local_key_path}`")
                 sheets = load_from_gsheets(spreadsheet_id, service_account_info)
                 # Hide the rest of the Data source UI
             except Exception as e:
@@ -626,20 +667,22 @@ def page_blood_panel():
 
     # Use the same filtered set as delta table
     latest_date = pd.to_datetime(data_sel["Date"].max())
+    out_now = data_sel[(data_sel["Date"] == latest_date) & (data_sel["status"].isin(["low","high"]))]["test"].nunique()
+    total_measured = data_sel[data_sel["Date"] == latest_date]["test"].nunique()
     k1, k2, k3 = st.columns(3)
     with k1:
-        st.metric("Latest sample date", latest_date.strftime("%Y-%m-%d") if pd.notna(latest_date) else "—")
+        st.metric("Latest sample", format_display_date(latest_date))
     with k2:
-        out_now = data_sel[(data_sel["Date"] == latest_date) & (data_sel["status"].isin(["low","high"]))]["test"].nunique()
-        st.metric("Out of range (latest)", int(out_now))
+        st.metric("Out of range", str(int(out_now)))
     with k3:
-        total_measured = data_sel[data_sel["Date"] == latest_date]["test"].nunique()
-        st.metric("Tests measured (latest)", int(total_measured))
-
-    st.markdown("<div style='margin-bottom: 1rem;'></div>", unsafe_allow_html=True)
+        st.metric("Measured markers", str(int(total_measured)))
 
     # "What's changed since last test"
-    st.markdown('<div class="section-header">Δ Since Last Test</div>', unsafe_allow_html=True)
+    render_section_header(
+        "Delta Since Last Test",
+        "A ranked view of what moved most since each biomarker was last measured.",
+        "Change analysis",
+    )
 
     # Remove accidental duplicates (defensive; canonical ranges should already prevent these)
     data_sel = (data_sel.sort_values(["test", "Date"])
@@ -692,7 +735,12 @@ def page_blood_panel():
         st.dataframe(styled, use_container_width=True, hide_index=True)
 
     # Grid of charts for selected tests
-    st.markdown('<div class="section-header">Selected Tests</div>', unsafe_allow_html=True)
+    selected_tests_title = grp if grp != "(All)" else "All Markers"
+    render_section_header(
+        selected_tests_title,
+        "Small-multiple trend cards make it easy to compare movement, range position, and momentum at a glance.",
+        "Visual explorer",
+    )
     if tests_selected:
         ncols = 3
         rows = (len(tests_selected) + ncols - 1)//ncols
@@ -704,14 +752,18 @@ def page_blood_panel():
                     continue
                 t = tests_selected[idx]
                 with cols[i]:
-                    st.markdown(f'<div class="chart-label">{t}</div>', unsafe_allow_html=True)
+                    st.markdown(f"<div class='chart-card-title'>{t}</div>", unsafe_allow_html=True)
                     fig = plot_single_test(data, t, show_ref=show_ref, show_regression=show_trend, show_zones=show_zones)
                     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
     else:
         st.info("Use the sidebar to select tests to visualize.")
 
     # Heatmap overview
-    st.markdown('<div class="section-header">Overview Heatmap</div>', unsafe_allow_html=True)
+    render_section_header(
+        "Overview Heatmap",
+        "A quick read on how your selected markers sit within their reference bands over time.",
+        "Portfolio view",
+    )
     if len(tests_selected) >= 2:
         fig_hm = plot_heatmap(data, tests_selected[:30])  # limit to 30 for readability
         st.plotly_chart(fig_hm, use_container_width=True)
@@ -719,7 +771,11 @@ def page_blood_panel():
         st.caption("Select 2 or more tests to see the heatmap.")
 
     # Export
-    st.markdown('<div class="section-header">Export</div>', unsafe_allow_html=True)
+    render_section_header(
+        "Export",
+        "Take the current story with you as a static report or a filtered dataset.",
+        "Share & archive",
+    )
     colA, colB = st.columns(2)
     with colA:
         st.caption("Export selected charts to standalone HTML")
@@ -740,30 +796,26 @@ def page_blood_panel():
 
 def page_fitbit_data():
     """Fitbit data visualization page — weight, HRV, and RHR."""
-
-    st.markdown('<div class="hero-header">Fitbit Data</div>', unsafe_allow_html=True)
-    st.markdown('<div class="hero-subtitle">Weight, health metrics, sleep, and activity from your Fitbit.</div>', unsafe_allow_html=True)
+    render_page_hero(
+        "Fitbit Sync",
+        "A calm, consumer-grade dashboard for recovery, sleep, movement, and body metrics streamed from Fitbit.",
+        pills=["Daily rhythm", "Recovery signals", "Activity patterns"],
+        eyebrow="Connected health",
+    )
 
     if not fitbit_client.is_configured():
-        st.warning("Fitbit is not configured yet. Go to **Fitbit Config** to connect your account.")
+        st.warning("Fitbit is not configured yet. Go to **Settings** to connect your account.")
         st.stop()
 
     if not fitbit_client.has_valid_token():
-        st.warning("Fitbit authorization has expired. Go to **Fitbit Config** to re-authorize.")
+        st.warning("Fitbit authorization has expired. Go to **Settings** to re-authorize.")
         st.stop()
 
-    # Sidebar controls
-    with st.sidebar:
-        st.markdown('<hr class="sidebar-divider">', unsafe_allow_html=True)
-        st.markdown('<div class="section-header" style="border-bottom:none; margin-top:0.5rem; font-size:1.1rem;">Fitbit Options</div>', unsafe_allow_html=True)
+    show_trend = True
+    force_full = bool(st.session_state.pop("fitbit_force_full_resync", False))
 
-        show_trend = st.checkbox("Show trend line", value=True)
-
-        if st.button("Sync latest data"):
-            st.cache_data.clear()
-            st.rerun()
-
-        force_full = st.button("Full re-sync (all history)")
+    loading_placeholder = st.empty()
+    content_placeholder = st.empty()
 
     def fetch_fitbit_metric(label: str, func_name: str, metric_name: str, force_full: bool):
         try:
@@ -793,15 +845,24 @@ def page_fitbit_data():
         ("Activity", "fetch_activity", "activity"),
     ]
     results = {}
-    with st.status("Loading Fitbit data...", expanded=False) as status:
+    with loading_placeholder.container():
+        render_section_header(
+            "Loading Fitbit",
+            "Syncing Fitbit metrics now. The dashboard shell stays in place while fresh data loads.",
+            "Sync in progress",
+        )
+        progress_text = st.empty()
+        progress_bar = st.progress(0)
         for label, func_name, metric_name in fetch_steps:
-            status.update(label=f"Fetching {label}...")
+            progress_text.caption(f"Fetching {label}...")
             results[func_name], warning = fetch_fitbit_metric(
                 label, func_name, metric_name, force_full
             )
             if warning:
                 fetch_warnings.append(warning)
-        status.update(label="Fitbit data loaded", state="complete")
+            progress_bar.progress((len(results)) / len(fetch_steps))
+        progress_text.caption("Fitbit data loaded.")
+        progress_bar.progress(1.0)
 
     weight_df = results["fetch_weight"]
     hrv_df = results["fetch_hrv"]
@@ -810,262 +871,278 @@ def page_fitbit_data():
     sleep_df = results["fetch_sleep"]
     sleep_score_df = results["fetch_sleep_score"]
     activity_df = results["fetch_activity"]
+    loading_placeholder.empty()
+    with content_placeholder.container():
+        for warning in fetch_warnings:
+            st.warning(warning)
 
-    for warning in fetch_warnings:
-        st.warning(warning)
+        # Merge sleep scores into sleep dataframe
+        if not sleep_df.empty and not sleep_score_df.empty:
+            sleep_df = sleep_df.drop(columns=["Score"], errors="ignore")
+            sleep_df = sleep_df.merge(sleep_score_df[["Date", "SleepScore"]], on="Date", how="left")
 
-    # Merge sleep scores into sleep dataframe
-    if not sleep_df.empty and not sleep_score_df.empty:
-        sleep_df = sleep_df.drop(columns=["Score"], errors="ignore")
-        sleep_df = sleep_df.merge(sleep_score_df[["Date", "SleepScore"]], on="Date", how="left")
+        # Most recent data date
+        all_dfs = [weight_df, hrv_df, rhr_df, br_df, sleep_df, activity_df]
+        latest_dates = []
+        for df in all_dfs:
+            if not df.empty:
+                latest_dates.append(pd.to_datetime(df.iloc[-1]['Date']))
+        if latest_dates:
+            most_recent = max(latest_dates)
+            render_chip_row([
+                f"Latest sync point: {format_display_date(most_recent)}",
+                f"Live datasets: {sum(0 if df.empty else 1 for df in all_dfs)} of {len(all_dfs)}",
+                "Automatic cached fallback enabled",
+            ])
+            k1, k2, k3 = st.columns(3)
+            with k1:
+                st.metric("Latest data point", format_display_date(most_recent))
+                st.caption("Most recent Fitbit date available across all feeds")
+            with k2:
+                st.metric("Feeds live", str(sum(0 if df.empty else 1 for df in all_dfs)))
+                st.caption("Weight, recovery, sleep, and activity feeds currently available")
+            with k3:
+                st.metric("Dashboard mode", "Resilient sync")
+                st.caption("Partial outages fall back to cached history instead of blanking the page")
 
-    # Most recent data date
-    all_dfs = [weight_df, hrv_df, rhr_df, br_df, sleep_df, activity_df]
-    latest_dates = []
-    for df in all_dfs:
-        if not df.empty:
-            latest_dates.append(pd.to_datetime(df.iloc[-1]['Date']))
-    if latest_dates:
-        most_recent = max(latest_dates).strftime('%-d %b %Y')
-        st.caption(f"Most recent data: {most_recent}")
+        # ==================================================================
+        # WEIGHT SECTION
+        # ==================================================================
+        render_section_header("Weight", "Body mass trends with a clean daily signal and moving average.", "Body composition")
+        if not weight_df.empty:
+            k1, k2 = st.columns([1, 3])
+            with k1:
+                latest_w = weight_df.iloc[-1]
+                st.metric("Latest Weight", f"{latest_w['Weight']:.1f} kg",
+                           delta=f"{weight_df['Weight'].iloc[-1] - weight_df['Weight'].iloc[-2]:.1f} kg" if len(weight_df) >= 2 else None)
+            fig_w = plot_fitbit_timeseries(weight_df, "Weight", "Weight", "kg", color="#E07A5F", show_trend=show_trend)
+            st.plotly_chart(fig_w, use_container_width=True, config={"displayModeBar": False})
+        else:
+            st.info("No weight data available.")
 
-    # ==================================================================
-    # WEIGHT SECTION
-    # ==================================================================
-    st.markdown('<div class="section-header">Weight</div>', unsafe_allow_html=True)
-    if not weight_df.empty:
-        k1, k2 = st.columns([1, 3])
-        with k1:
-            latest_w = weight_df.iloc[-1]
-            st.metric("Latest Weight", f"{latest_w['Weight']:.1f} kg",
-                       delta=f"{weight_df['Weight'].iloc[-1] - weight_df['Weight'].iloc[-2]:.1f} kg" if len(weight_df) >= 2 else None)
-        fig_w = plot_fitbit_timeseries(weight_df, "Weight", "Weight", "kg", color="#E07A5F", show_trend=show_trend)
-        st.plotly_chart(fig_w, use_container_width=True, config={"displayModeBar": False})
-    else:
-        st.info("No weight data available.")
+        # ==================================================================
+        # HEALTH METRICS SECTION
+        # ==================================================================
+        render_section_header("Health Metrics", "Recovery markers that help frame stress, readiness, and baseline physiology.", "Recovery")
 
-    # ==================================================================
-    # HEALTH METRICS SECTION
-    # ==================================================================
-    st.markdown('<div class="section-header">Health Metrics</div>', unsafe_allow_html=True)
-
-    # Summary metrics row
-    hm1, hm2, hm3 = st.columns(3)
-    with hm1:
-        if not hrv_df.empty:
-            latest_hrv = hrv_df.dropna(subset=["RMSSD"])
-            if not latest_hrv.empty:
-                st.metric("Latest HRV (RMSSD)", f"{latest_hrv.iloc[-1]['RMSSD']:.0f} ms",
-                           delta=f"{latest_hrv['RMSSD'].iloc[-1] - latest_hrv['RMSSD'].iloc[-2]:.0f} ms" if len(latest_hrv) >= 2 else None)
+        hm1, hm2, hm3 = st.columns(3)
+        with hm1:
+            if not hrv_df.empty:
+                latest_hrv = hrv_df.dropna(subset=["RMSSD"])
+                if not latest_hrv.empty:
+                    st.metric("Latest HRV (RMSSD)", f"{latest_hrv.iloc[-1]['RMSSD']:.0f} ms",
+                               delta=f"{latest_hrv['RMSSD'].iloc[-1] - latest_hrv['RMSSD'].iloc[-2]:.0f} ms" if len(latest_hrv) >= 2 else None)
+                else:
+                    st.metric("Latest HRV (RMSSD)", "—")
             else:
                 st.metric("Latest HRV (RMSSD)", "—")
+        with hm2:
+            if not rhr_df.empty:
+                latest_rhr = rhr_df.iloc[-1]
+                st.metric("Latest RHR", f"{latest_rhr['RHR']:.0f} bpm",
+                           delta=f"{rhr_df['RHR'].iloc[-1] - rhr_df['RHR'].iloc[-2]:.0f} bpm" if len(rhr_df) >= 2 else None,
+                           delta_color="inverse")
+            else:
+                st.metric("Latest RHR", "—")
+        with hm3:
+            if not br_df.empty:
+                latest_br = br_df.iloc[-1]
+                st.metric("Latest Breathing Rate", f"{latest_br['BreathingRate']:.1f} brpm",
+                           delta=f"{br_df['BreathingRate'].iloc[-1] - br_df['BreathingRate'].iloc[-2]:.1f} brpm" if len(br_df) >= 2 else None)
+            else:
+                st.metric("Latest Breathing Rate", "—")
+
+        st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True)
+
+        if not hrv_df.empty:
+            fig_hrv = plot_fitbit_timeseries(hrv_df, "RMSSD", "HRV", "ms", color="#81B29A", show_trend=show_trend)
+            st.plotly_chart(fig_hrv, use_container_width=True, config={"displayModeBar": False})
         else:
-            st.metric("Latest HRV (RMSSD)", "—")
-    with hm2:
+            st.info("No HRV data available.")
+
         if not rhr_df.empty:
-            latest_rhr = rhr_df.iloc[-1]
-            st.metric("Latest RHR", f"{latest_rhr['RHR']:.0f} bpm",
-                       delta=f"{rhr_df['RHR'].iloc[-1] - rhr_df['RHR'].iloc[-2]:.0f} bpm" if len(rhr_df) >= 2 else None,
-                       delta_color="inverse")
+            fig_rhr = plot_fitbit_timeseries(rhr_df, "RHR", "Resting HR", "bpm", color="#F2CC8F", show_trend=show_trend)
+            st.plotly_chart(fig_rhr, use_container_width=True, config={"displayModeBar": False})
         else:
-            st.metric("Latest RHR", "—")
-    with hm3:
+            st.info("No resting heart rate data available.")
+
         if not br_df.empty:
-            latest_br = br_df.iloc[-1]
-            st.metric("Latest Breathing Rate", f"{latest_br['BreathingRate']:.1f} brpm",
-                       delta=f"{br_df['BreathingRate'].iloc[-1] - br_df['BreathingRate'].iloc[-2]:.1f} brpm" if len(br_df) >= 2 else None)
+            fig_br = plot_fitbit_timeseries(br_df, "BreathingRate", "Breathing Rate", "brpm", color="#7EB8DA", show_trend=show_trend)
+            st.plotly_chart(fig_br, use_container_width=True, config={"displayModeBar": False})
         else:
-            st.metric("Latest Breathing Rate", "—")
+            st.info("No breathing rate data available.")
 
-    st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True)
-
-    # HRV chart
-    if not hrv_df.empty:
-        fig_hrv = plot_fitbit_timeseries(hrv_df, "RMSSD", "HRV", "ms", color="#81B29A", show_trend=show_trend)
-        st.plotly_chart(fig_hrv, use_container_width=True, config={"displayModeBar": False})
-    else:
-        st.info("No HRV data available.")
-
-    # RHR chart
-    if not rhr_df.empty:
-        fig_rhr = plot_fitbit_timeseries(rhr_df, "RHR", "Resting HR", "bpm", color="#F2CC8F", show_trend=show_trend)
-        st.plotly_chart(fig_rhr, use_container_width=True, config={"displayModeBar": False})
-    else:
-        st.info("No resting heart rate data available.")
-
-    # Breathing Rate chart
-    if not br_df.empty:
-        fig_br = plot_fitbit_timeseries(br_df, "BreathingRate", "Breathing Rate", "brpm", color="#7EB8DA", show_trend=show_trend)
-        st.plotly_chart(fig_br, use_container_width=True, config={"displayModeBar": False})
-    else:
-        st.info("No breathing rate data available.")
-
-    # ==================================================================
-    # SLEEP SECTION
-    # ==================================================================
-    st.markdown('<div class="section-header">Sleep</div>', unsafe_allow_html=True)
-    if not sleep_df.empty:
-        # Summary metrics
-        sl1, sl2, sl3 = st.columns(3)
-        with sl1:
-            latest_sleep = sleep_df.iloc[-1]
-            hrs = latest_sleep.get("DurationHours", 0)
-            st.metric("Latest Sleep Duration", f"{hrs:.1f} hrs",
-                       delta=f"{sleep_df['DurationHours'].iloc[-1] - sleep_df['DurationHours'].iloc[-2]:.1f} hrs" if len(sleep_df) >= 2 else None)
-        with sl2:
-            if "SleepScore" in sleep_df.columns and sleep_df["SleepScore"].notna().any():
-                score_data = sleep_df.dropna(subset=["SleepScore"])
-                if not score_data.empty:
-                    st.metric("Latest Sleep Score", f"{score_data.iloc[-1]['SleepScore']:.0f}",
-                               delta=f"{score_data['SleepScore'].iloc[-1] - score_data['SleepScore'].iloc[-2]:.0f}" if len(score_data) >= 2 else None)
+        # ==================================================================
+        # SLEEP SECTION
+        # ==================================================================
+        render_section_header("Sleep", "Duration, quality, and stage distribution in a format that feels like a premium wearable app.", "Rest")
+        if not sleep_df.empty:
+            sl1, sl2, sl3 = st.columns(3)
+            with sl1:
+                latest_sleep = sleep_df.iloc[-1]
+                hrs = latest_sleep.get("DurationHours", 0)
+                st.metric("Latest Sleep Duration", f"{hrs:.1f} hrs",
+                           delta=f"{sleep_df['DurationHours'].iloc[-1] - sleep_df['DurationHours'].iloc[-2]:.1f} hrs" if len(sleep_df) >= 2 else None)
+            with sl2:
+                if "SleepScore" in sleep_df.columns and sleep_df["SleepScore"].notna().any():
+                    score_data = sleep_df.dropna(subset=["SleepScore"])
+                    if not score_data.empty:
+                        st.metric("Latest Sleep Score", f"{score_data.iloc[-1]['SleepScore']:.0f}",
+                                   delta=f"{score_data['SleepScore'].iloc[-1] - score_data['SleepScore'].iloc[-2]:.0f}" if len(score_data) >= 2 else None)
+                    else:
+                        st.metric("Latest Sleep Score", "—")
                 else:
                     st.metric("Latest Sleep Score", "—")
-            else:
-                st.metric("Latest Sleep Score", "—")
-        with sl3:
-            if not sleep_df["Efficiency"].isna().all():
-                eff_data = sleep_df.dropna(subset=["Efficiency"])
-                if not eff_data.empty:
-                    st.metric("Latest Efficiency", f"{eff_data.iloc[-1]['Efficiency']:.0f}%",
-                               delta=f"{eff_data['Efficiency'].iloc[-1] - eff_data['Efficiency'].iloc[-2]:.0f}%" if len(eff_data) >= 2 else None)
+            with sl3:
+                if not sleep_df["Efficiency"].isna().all():
+                    eff_data = sleep_df.dropna(subset=["Efficiency"])
+                    if not eff_data.empty:
+                        st.metric("Latest Efficiency", f"{eff_data.iloc[-1]['Efficiency']:.0f}%",
+                                   delta=f"{eff_data['Efficiency'].iloc[-1] - eff_data['Efficiency'].iloc[-2]:.0f}%" if len(eff_data) >= 2 else None)
+                    else:
+                        st.metric("Latest Efficiency", "—")
                 else:
                     st.metric("Latest Efficiency", "—")
-            else:
-                st.metric("Latest Efficiency", "—")
 
-        st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True)
+            st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True)
 
-        # Sleep Duration chart
-        fig_dur = plot_fitbit_timeseries(sleep_df, "DurationHours", "Sleep Duration", "hours", color="#8E7CC3", show_trend=show_trend)
-        st.plotly_chart(fig_dur, use_container_width=True, config={"displayModeBar": False})
+            fig_dur = plot_fitbit_timeseries(sleep_df, "DurationHours", "Sleep Duration", "hours", color="#8E7CC3", show_trend=show_trend)
+            st.plotly_chart(fig_dur, use_container_width=True, config={"displayModeBar": False})
 
-        # Sleep Score chart
-        if "SleepScore" in sleep_df.columns and sleep_df["SleepScore"].notna().any():
-            fig_score = plot_fitbit_timeseries(sleep_df, "SleepScore", "Sleep Score", "score", color="#6AA84F", show_trend=show_trend)
-            st.plotly_chart(fig_score, use_container_width=True, config={"displayModeBar": False})
+            if "SleepScore" in sleep_df.columns and sleep_df["SleepScore"].notna().any():
+                fig_score = plot_fitbit_timeseries(sleep_df, "SleepScore", "Sleep Score", "score", color="#6AA84F", show_trend=show_trend)
+                st.plotly_chart(fig_score, use_container_width=True, config={"displayModeBar": False})
 
-        # Sleep stages charts
-        stage_cols = {"REM": "#E06666", "Deep": "#3D85C6", "Light": "#F6B26B", "Wake": "#CC0000"}
-        has_stages = any(sleep_df[col].notna().any() for col in stage_cols if col in sleep_df.columns)
-        if has_stages:
-            st.caption("Sleep Stages")
-            c1, c2 = st.columns(2)
-            stage_items = [(col, color) for col, color in stage_cols.items() if col in sleep_df.columns and sleep_df[col].notna().any()]
-            for i, (col, color) in enumerate(stage_items):
-                with (c1 if i % 2 == 0 else c2):
-                    fig_stage = plot_fitbit_timeseries(sleep_df, col, col, "min", color=color, show_trend=show_trend)
-                    fig_stage.update_layout(height=300)
-                    st.plotly_chart(fig_stage, use_container_width=True, config={"displayModeBar": False})
-    else:
-        st.info("No sleep data available.")
-
-    # ==================================================================
-    # ACTIVITY SECTION
-    # ==================================================================
-    st.markdown('<div class="section-header">Activity</div>', unsafe_allow_html=True)
-    if not activity_df.empty:
-        # Summary metrics
-        a1, a2, a3, a4 = st.columns(4)
-        with a1:
-            latest_act = activity_df.iloc[-1]
-            st.metric("Latest Steps", f"{latest_act.get('Steps', 0):,.0f}",
-                       delta=f"{activity_df['Steps'].iloc[-1] - activity_df['Steps'].iloc[-2]:,.0f}" if len(activity_df) >= 2 else None)
-        with a2:
-            if "ZoneMinutes" in activity_df.columns:
-                st.metric("Latest Zone Minutes", f"{latest_act.get('ZoneMinutes', 0):.0f} min",
-                           delta=f"{activity_df['ZoneMinutes'].iloc[-1] - activity_df['ZoneMinutes'].iloc[-2]:.0f} min" if len(activity_df) >= 2 else None)
-        with a3:
-            st.metric("Latest Distance", f"{latest_act.get('Distance', 0):.2f} km",
-                       delta=f"{activity_df['Distance'].iloc[-1] - activity_df['Distance'].iloc[-2]:.2f} km" if len(activity_df) >= 2 else None)
-        with a4:
-            st.metric("Latest Calories", f"{latest_act.get('Calories', 0):,.0f}",
-                       delta=f"{activity_df['Calories'].iloc[-1] - activity_df['Calories'].iloc[-2]:,.0f}" if len(activity_df) >= 2 else None)
-
-        st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True)
-
-        # Steps chart
-        fig_steps = plot_fitbit_timeseries(activity_df, "Steps", "Steps", "steps", color="#E07A5F", show_trend=show_trend)
-        st.plotly_chart(fig_steps, use_container_width=True, config={"displayModeBar": False})
-
-        # Zone Minutes chart
-        if "ZoneMinutes" in activity_df.columns:
-            fig_zm = plot_fitbit_timeseries(activity_df, "ZoneMinutes", "Active Zone Minutes", "min", color="#81B29A", show_trend=show_trend)
-            st.plotly_chart(fig_zm, use_container_width=True, config={"displayModeBar": False})
-
-        # Distance chart
-        fig_dist = plot_fitbit_timeseries(activity_df, "Distance", "Distance", "km", color="#7EB8DA", show_trend=show_trend)
-        st.plotly_chart(fig_dist, use_container_width=True, config={"displayModeBar": False})
-
-        # Calories chart
-        fig_cal = plot_fitbit_timeseries(activity_df, "Calories", "Calories", "kcal", color="#F2CC8F", show_trend=show_trend)
-        st.plotly_chart(fig_cal, use_container_width=True, config={"displayModeBar": False})
-
-        # Zone Minutes breakdown
-        zone_cols = {
-            "MinutesVeryActive": ("#CC0000", "Peak"),
-            "MinutesFairlyActive": ("#E07A5F", "Moderate"),
-        }
-        has_zones = any(col in activity_df.columns and activity_df[col].notna().any() for col in zone_cols)
-        if has_zones:
-            st.caption("Active Zone Minutes Breakdown")
-            zc1, zc2 = st.columns(2)
-            zone_items = [(col, color, label) for col, (color, label) in zone_cols.items() if col in activity_df.columns and activity_df[col].notna().any()]
-            for i, (col, color, label) in enumerate(zone_items):
-                with (zc1 if i % 2 == 0 else zc2):
-                    fig_zone = plot_fitbit_timeseries(activity_df, col, label, "min", color=color, show_trend=show_trend)
-                    fig_zone.update_layout(height=300)
-                    st.plotly_chart(fig_zone, use_container_width=True, config={"displayModeBar": False})
-    else:
-        st.info("No activity data available.")
-
-    # ==================================================================
-    # RAW DATA
-    # ==================================================================
-    st.markdown('<div class="section-header">Raw Data</div>', unsafe_allow_html=True)
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Weight", "HRV", "RHR", "Breathing Rate", "Sleep", "Activity"])
-    with tab1:
-        if not weight_df.empty:
-            st.dataframe(weight_df.sort_values("Date", ascending=False), use_container_width=True, hide_index=True)
+            stage_cols = {"REM": "#E06666", "Deep": "#3D85C6", "Light": "#F6B26B", "Wake": "#CC0000"}
+            has_stages = any(sleep_df[col].notna().any() for col in stage_cols if col in sleep_df.columns)
+            if has_stages:
+                st.caption("Sleep Stages")
+                c1, c2 = st.columns(2)
+                stage_items = [(col, color) for col, color in stage_cols.items() if col in sleep_df.columns and sleep_df[col].notna().any()]
+                for i, (col, color) in enumerate(stage_items):
+                    with (c1 if i % 2 == 0 else c2):
+                        fig_stage = plot_fitbit_timeseries(sleep_df, col, col, "min", color=color, show_trend=show_trend)
+                        fig_stage.update_layout(height=300)
+                        st.plotly_chart(fig_stage, use_container_width=True, config={"displayModeBar": False})
         else:
-            st.caption("No data.")
-    with tab2:
-        if not hrv_df.empty:
-            st.dataframe(hrv_df.sort_values("Date", ascending=False), use_container_width=True, hide_index=True)
-        else:
-            st.caption("No data.")
-    with tab3:
-        if not rhr_df.empty:
-            st.dataframe(rhr_df.sort_values("Date", ascending=False), use_container_width=True, hide_index=True)
-        else:
-            st.caption("No data.")
-    with tab4:
-        if not br_df.empty:
-            st.dataframe(br_df.sort_values("Date", ascending=False), use_container_width=True, hide_index=True)
-        else:
-            st.caption("No data.")
-    with tab5:
-        if not sleep_df.empty:
-            st.dataframe(sleep_df.sort_values("Date", ascending=False), use_container_width=True, hide_index=True)
-        else:
-            st.caption("No data.")
-    with tab6:
+            st.info("No sleep data available.")
+
+        # ==================================================================
+        # ACTIVITY SECTION
+        # ==================================================================
+        render_section_header("Activity", "Movement, calories, and intensity minutes with clearer pacing and emphasis.", "Movement")
         if not activity_df.empty:
-            st.dataframe(activity_df.sort_values("Date", ascending=False), use_container_width=True, hide_index=True)
+            a1, a2, a3, a4 = st.columns(4)
+            with a1:
+                latest_act = activity_df.iloc[-1]
+                st.metric("Latest Steps", f"{latest_act.get('Steps', 0):,.0f}",
+                           delta=f"{activity_df['Steps'].iloc[-1] - activity_df['Steps'].iloc[-2]:,.0f}" if len(activity_df) >= 2 else None)
+            with a2:
+                if "ZoneMinutes" in activity_df.columns:
+                    st.metric("Latest Zone Minutes", f"{latest_act.get('ZoneMinutes', 0):.0f} min",
+                               delta=f"{activity_df['ZoneMinutes'].iloc[-1] - activity_df['ZoneMinutes'].iloc[-2]:.0f} min" if len(activity_df) >= 2 else None)
+            with a3:
+                st.metric("Latest Distance", f"{latest_act.get('Distance', 0):.2f} km",
+                           delta=f"{activity_df['Distance'].iloc[-1] - activity_df['Distance'].iloc[-2]:.2f} km" if len(activity_df) >= 2 else None)
+            with a4:
+                st.metric("Latest Calories", f"{latest_act.get('Calories', 0):,.0f}",
+                           delta=f"{activity_df['Calories'].iloc[-1] - activity_df['Calories'].iloc[-2]:,.0f}" if len(activity_df) >= 2 else None)
+
+            st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True)
+
+            fig_steps = plot_fitbit_timeseries(activity_df, "Steps", "Steps", "steps", color="#E07A5F", show_trend=show_trend)
+            st.plotly_chart(fig_steps, use_container_width=True, config={"displayModeBar": False})
+
+            if "ZoneMinutes" in activity_df.columns:
+                fig_zm = plot_fitbit_timeseries(activity_df, "ZoneMinutes", "Active Zone Minutes", "min", color="#81B29A", show_trend=show_trend)
+                st.plotly_chart(fig_zm, use_container_width=True, config={"displayModeBar": False})
+
+            fig_dist = plot_fitbit_timeseries(activity_df, "Distance", "Distance", "km", color="#7EB8DA", show_trend=show_trend)
+            st.plotly_chart(fig_dist, use_container_width=True, config={"displayModeBar": False})
+
+            fig_cal = plot_fitbit_timeseries(activity_df, "Calories", "Calories", "kcal", color="#F2CC8F", show_trend=show_trend)
+            st.plotly_chart(fig_cal, use_container_width=True, config={"displayModeBar": False})
+
+            zone_cols = {
+                "MinutesVeryActive": ("#CC0000", "Peak"),
+                "MinutesFairlyActive": ("#E07A5F", "Moderate"),
+            }
+            has_zones = any(col in activity_df.columns and activity_df[col].notna().any() for col in zone_cols)
+            if has_zones:
+                st.caption("Active Zone Minutes Breakdown")
+                zc1, zc2 = st.columns(2)
+                zone_items = [(col, color, label) for col, (color, label) in zone_cols.items() if col in activity_df.columns and activity_df[col].notna().any()]
+                for i, (col, color, label) in enumerate(zone_items):
+                    with (zc1 if i % 2 == 0 else zc2):
+                        fig_zone = plot_fitbit_timeseries(activity_df, col, label, "min", color=color, show_trend=show_trend)
+                        fig_zone.update_layout(height=300)
+                        st.plotly_chart(fig_zone, use_container_width=True, config={"displayModeBar": False})
         else:
-            st.caption("No data.")
+            st.info("No activity data available.")
+
+        # ==================================================================
+        # RAW DATA
+        # ==================================================================
+        render_section_header("Raw Data", "Detailed tables for inspection when you want the underlying records, not just the polished summary.", "Audit trail")
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Weight", "HRV", "RHR", "Breathing Rate", "Sleep", "Activity"])
+        with tab1:
+            if not weight_df.empty:
+                st.dataframe(weight_df.sort_values("Date", ascending=False), use_container_width=True, hide_index=True)
+            else:
+                st.caption("No data.")
+        with tab2:
+            if not hrv_df.empty:
+                st.dataframe(hrv_df.sort_values("Date", ascending=False), use_container_width=True, hide_index=True)
+            else:
+                st.caption("No data.")
+        with tab3:
+            if not rhr_df.empty:
+                st.dataframe(rhr_df.sort_values("Date", ascending=False), use_container_width=True, hide_index=True)
+            else:
+                st.caption("No data.")
+        with tab4:
+            if not br_df.empty:
+                st.dataframe(br_df.sort_values("Date", ascending=False), use_container_width=True, hide_index=True)
+            else:
+                st.caption("No data.")
+        with tab5:
+            if not sleep_df.empty:
+                st.dataframe(sleep_df.sort_values("Date", ascending=False), use_container_width=True, hide_index=True)
+            else:
+                st.caption("No data.")
+        with tab6:
+            if not activity_df.empty:
+                st.dataframe(activity_df.sort_values("Date", ascending=False), use_container_width=True, hide_index=True)
+            else:
+                st.caption("No data.")
 
 
-def page_fitbit_config():
-    """Fitbit API configuration and authorization page."""
+def page_settings():
+    """Settings page for data sources and Fitbit configuration."""
+    render_page_hero(
+        "Settings",
+        "Manage the technical setup for data sources, local credentials, and Fitbit connectivity.",
+        pills=["Sources", "Connection", "Maintenance"],
+        eyebrow="Configuration",
+    )
 
-    st.markdown('<div class="hero-header">Fitbit Configuration</div>', unsafe_allow_html=True)
-    st.markdown('<div class="hero-subtitle">Connect your Fitbit account to pull weight, HRV, and resting heart rate data.</div>', unsafe_allow_html=True)
-
+    local_key_path = os.path.join(os.path.dirname(__file__), "sheet_api_key.json")
+    default_sheet_url = "https://docs.google.com/spreadsheets/d/1pfYaK6t25gcKdBAUu8_geyGlQP6wp6px9IyNUKI4wdw/edit?usp=sharing"
+    spreadsheet_id = parse_spreadsheet_id(default_sheet_url)
     config = fitbit_client.load_config()
+    fitbit_connected = fitbit_client.has_valid_token()
+
+    render_section_header("Data Source", "Technical configuration for the Google Sheets source used by the blood panel dashboard.", "Sources")
+    if os.path.exists(local_key_path):
+        st.success("Local Google Sheets key detected.")
+        st.caption(f"Using local key: `{local_key_path}`")
+    else:
+        st.info("No local Google Sheets key detected. The blood panel page will prompt for a service account file.")
+    st.caption(f"Default spreadsheet ID: `{spreadsheet_id}`")
 
     # Status
-    st.markdown('<div class="section-header">Connection Status</div>', unsafe_allow_html=True)
-    if fitbit_client.has_valid_token():
+    render_section_header("Connection Status", "A quick health check of your local Fitbit connection and token state.", "Setup")
+    if fitbit_connected:
         st.success("Connected to Fitbit")
         st.caption(f"User ID: `{config.get('user_id', 'unknown')}`")
         from datetime import datetime as dt
@@ -1078,8 +1155,10 @@ def page_fitbit_config():
         st.info("Not configured. Follow the steps below to connect.")
 
     # Step 1: Client ID
-    st.markdown('<div class="section-header">Step 1: Register a Fitbit App</div>', unsafe_allow_html=True)
-    st.markdown("""
+    register_container = st.expander("Register A Fitbit App", expanded=not fitbit_connected)
+    with register_container:
+        st.caption("Create a personal Fitbit app once, then use it as the secure bridge for this dashboard.")
+        st.markdown("""
 1. Go to [dev.fitbit.com/apps/new](https://dev.fitbit.com/apps/new)
 2. Fill in the form:
    - **OAuth 2.0 Application Type**: Personal
@@ -1088,60 +1167,69 @@ def page_fitbit_config():
 3. Copy the **OAuth 2.0 Client ID** below.
 """)
 
-    client_id = st.text_input("Client ID", value=config.get("client_id", ""), type="default")
+        client_id = st.text_input("Client ID", value=config.get("client_id", ""), type="default")
 
-    if client_id:
-        # Save client_id
-        if client_id != config.get("client_id"):
-            config["client_id"] = client_id
-            fitbit_client.save_config(config)
-            st.success("Client ID saved.")
+        if client_id:
+            # Save client_id
+            if client_id != config.get("client_id"):
+                config["client_id"] = client_id
+                fitbit_client.save_config(config)
+                st.success("Client ID saved.")
 
-        # Step 2: Authorize
-        st.markdown('<div class="section-header">Step 2: Authorize</div>', unsafe_allow_html=True)
+            # Step 2: Authorize
+            render_section_header("Authorize", "Generate an approval link and complete the OAuth handshake in the browser.", "Step 2")
 
-        redirect_uri = "http://localhost:8501"
+            redirect_uri = "http://localhost:8501"
 
-        # Persist code_verifier to disk so it survives page reloads and redirects
-        stored_verifier = config.get("code_verifier")
-        if stored_verifier:
-            # Rebuild auth URL with the stored verifier's challenge
-            import hashlib, base64
-            digest = hashlib.sha256(stored_verifier.encode("ascii")).digest()
-            challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
-            code_verifier, code_challenge = stored_verifier, challenge
-        else:
-            code_verifier, code_challenge = fitbit_client.generate_pkce_pair()
-            config["code_verifier"] = code_verifier
-            fitbit_client.save_config(config)
+            # Persist code_verifier to disk so it survives page reloads and redirects
+            stored_verifier = config.get("code_verifier")
+            if stored_verifier:
+                # Rebuild auth URL with the stored verifier's challenge
+                import hashlib, base64
+                digest = hashlib.sha256(stored_verifier.encode("ascii")).digest()
+                challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+                code_verifier, code_challenge = stored_verifier, challenge
+            else:
+                code_verifier, code_challenge = fitbit_client.generate_pkce_pair()
+                config["code_verifier"] = code_verifier
+                fitbit_client.save_config(config)
 
-        auth_params = urllib.parse.urlencode({
-            "response_type": "code",
-            "client_id": client_id,
-            "redirect_uri": redirect_uri,
-            "scope": "profile weight heartrate respiratory_rate sleep activity",
-            "code_challenge": code_challenge,
-            "code_challenge_method": "S256",
-            "prompt": "consent",
-        })
-        auth_url = f"https://www.fitbit.com/oauth2/authorize?{auth_params}"
+            auth_params = urllib.parse.urlencode({
+                "response_type": "code",
+                "client_id": client_id,
+                "redirect_uri": redirect_uri,
+                "scope": "profile weight heartrate respiratory_rate sleep activity",
+                "code_challenge": code_challenge,
+                "code_challenge_method": "S256",
+                "prompt": "consent",
+            })
+            auth_url = f"https://www.fitbit.com/oauth2/authorize?{auth_params}"
 
-        st.markdown(f"[Click here to authorize with Fitbit]({auth_url})")
-        st.caption("After authorizing, you'll be redirected back and connected automatically.")
+            st.markdown(f"[Click here to authorize with Fitbit]({auth_url})")
+            st.caption("After authorizing, you'll be redirected back and connected automatically.")
 
-        if st.button("Generate new auth link"):
-            config.pop("code_verifier", None)
-            fitbit_client.save_config(config)
-            st.rerun()
+            if st.button("Generate new auth link"):
+                config.pop("code_verifier", None)
+                fitbit_client.save_config(config)
+                st.rerun()
 
     # Disconnect
-    st.markdown('<div class="section-header">Manage Connection</div>', unsafe_allow_html=True)
-    col1, col2 = st.columns(2)
+    render_section_header("Manage Connection", "Clear local cache or disconnect the integration when you want a clean reset.", "Maintenance")
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
+        if st.button("Sync latest Fitbit data"):
+            st.cache_data.clear()
+            st.success("Fitbit data will refresh the next time you open Fitbit Data.")
+    with col2:
+        if st.button("Full Fitbit re-sync"):
+            st.session_state["fitbit_force_full_resync"] = True
+            st.cache_data.clear()
+            st.success("A full Fitbit history re-sync will run the next time you open Fitbit Data.")
+    with col3:
         if st.button("Clear cached data"):
             fitbit_client.clear_cache()
             st.success("Cache cleared.")
-    with col2:
+    with col4:
         if st.button("Disconnect Fitbit"):
             fitbit_client.disconnect()
             st.success("Disconnected. Config and cache removed.")
@@ -1152,171 +1240,440 @@ def page_fitbit_config():
 # MAIN APP — page config, global CSS, sidebar nav
 # =====================================================================
 
-st.set_page_config(page_title="Health Explorer", layout="wide")
+st.set_page_config(page_title="Health Atlas", layout="wide")
 
 # ---- Global CSS ----
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;700&display=swap');
 
-/* Base font & background */
+:root {
+    --bg-top: #f4efe7;
+    --bg-bottom: #e9ece7;
+    --panel: rgba(255, 251, 247, 0.88);
+    --panel-strong: rgba(255, 255, 255, 0.94);
+    --panel-border: rgba(38, 57, 53, 0.1);
+    --ink: #18322f;
+    --muted: #667874;
+    --accent: #d96b42;
+    --accent-dark: #b65433;
+    --accent-soft: rgba(217, 107, 66, 0.12);
+    --moss: #7a9d8d;
+    --moss-soft: rgba(122, 157, 141, 0.18);
+    --line: rgba(24, 50, 47, 0.08);
+    --shadow: 0 18px 60px rgba(21, 38, 35, 0.08);
+    --radius-xl: 28px;
+    --radius-lg: 22px;
+    --radius-md: 16px;
+}
+
 html, body, [class*="css"] {
-    font-family: 'Inter', sans-serif;
-    color: #3D405B;
+    font-family: 'Manrope', sans-serif;
+    color: var(--ink);
 }
+
 .stApp {
-    background-color: #FFF8F2;
+    color: var(--ink);
+    background:
+        radial-gradient(circle at top left, rgba(217, 107, 66, 0.14), transparent 28%),
+        radial-gradient(circle at 85% 15%, rgba(122, 157, 141, 0.18), transparent 24%),
+        linear-gradient(180deg, var(--bg-top) 0%, var(--bg-bottom) 100%);
 }
 
-/* Reduce top padding */
 .block-container {
-    padding-top: 2rem !important;
+    max-width: 1460px;
+    padding-top: 2.2rem !important;
+    padding-bottom: 3.5rem !important;
 }
 
-/* Hide hamburger menu & footer */
 #MainMenu {visibility: hidden;}
 footer {visibility: hidden;}
 
-/* Sidebar */
 section[data-testid="stSidebar"] {
-    background-color: #FAF0E6;
-}
-section[data-testid="stSidebar"] .stMarkdown h1,
-section[data-testid="stSidebar"] .stMarkdown h2,
-section[data-testid="stSidebar"] .stMarkdown h3 {
-    color: #3D405B;
-    letter-spacing: -0.02em;
+    background:
+        linear-gradient(180deg, rgba(251, 245, 237, 0.96) 0%, rgba(242, 236, 226, 0.98) 100%);
+    border-right: 1px solid rgba(24, 50, 47, 0.08);
 }
 
-/* Section headers */
-h2, h3 {
-    color: #3D405B !important;
+section[data-testid="stSidebar"] > div {
+    background: transparent;
+}
+
+section[data-testid="stSidebar"] * {
+    color: var(--ink);
+}
+
+section[data-testid="stSidebar"] .stCaption,
+section[data-testid="stSidebar"] label,
+section[data-testid="stSidebar"] p {
+    color: var(--muted) !important;
+}
+
+section[data-testid="stSidebar"] .stTextInput input,
+section[data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] > div,
+section[data-testid="stSidebar"] .stMultiSelect [data-baseweb="select"] > div,
+section[data-testid="stSidebar"] .stFileUploader section {
+    background: rgba(255, 255, 255, 0.72) !important;
+    border: 1px solid rgba(24, 50, 47, 0.1) !important;
+    border-radius: 16px !important;
+}
+
+section[data-testid="stSidebar"] .stRadio > div {
+    gap: 0.5rem;
+}
+
+section[data-testid="stSidebar"] .stRadio label {
+    background: rgba(255, 255, 255, 0.55);
+    border: 1px solid rgba(24, 50, 47, 0.08);
+    border-radius: 14px;
+    padding: 0.7rem 0.9rem;
+}
+
+section[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] {
+    gap: 0.55rem;
+}
+
+section[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] > label {
+    min-height: 48px;
+    background: rgba(255, 255, 255, 0.72) !important;
+    border: 1px solid rgba(24, 50, 47, 0.08) !important;
+    border-radius: 16px !important;
+    padding: 0.75rem 0.9rem !important;
+    transition: background 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+section[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] > label:hover {
+    background: rgba(255, 255, 255, 0.92) !important;
+}
+
+section[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] > label p {
+    color: var(--ink) !important;
+    font-weight: 700 !important;
     letter-spacing: -0.01em;
 }
 
-/* Metric cards */
-div[data-testid="stMetric"] {
-    background: #FFFFFF;
-    border-radius: 12px;
-    box-shadow: 0 1px 6px rgba(61, 64, 91, 0.08);
-    border-left: 4px solid #E07A5F;
-    padding: 16px 20px;
-}
-div[data-testid="stMetric"] label {
-    color: #8D8D9B !important;
-    font-size: 0.82rem;
-    font-weight: 500;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-}
-div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
-    color: #3D405B !important;
-    font-weight: 600;
+section[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] > label:has(input:checked) {
+    background: linear-gradient(135deg, var(--accent) 0%, var(--accent-dark) 100%) !important;
+    border-color: transparent !important;
+    box-shadow: 0 12px 28px rgba(217, 107, 66, 0.22) !important;
 }
 
-/* Buttons */
-.stButton > button {
-    background-color: #E07A5F !important;
-    color: #FFFFFF !important;
-    border: none !important;
-    border-radius: 8px !important;
-    font-weight: 500 !important;
-    padding: 0.5rem 1.25rem !important;
-    transition: background-color 0.2s ease;
-}
-.stButton > button:hover {
-    background-color: #c9684f !important;
-    color: #FFFFFF !important;
+section[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] > label:has(input:checked) p {
+    color: #fffdfb !important;
 }
 
-/* Download buttons */
-.stDownloadButton > button {
-    background-color: #E07A5F !important;
-    color: #FFFFFF !important;
-    border: none !important;
-    border-radius: 8px !important;
-    font-weight: 500 !important;
-}
-.stDownloadButton > button:hover {
-    background-color: #c9684f !important;
-    color: #FFFFFF !important;
-}
-
-/* Dataframe container */
-div[data-testid="stDataFrame"] {
-    border-radius: 12px;
-    border: 1px solid #F0E6D8;
-    overflow: hidden;
-}
-
-/* Styled section header helper */
-.section-header {
-    font-family: 'Inter', sans-serif;
-    font-size: 1.35rem;
-    font-weight: 600;
-    color: #3D405B;
-    letter-spacing: -0.01em;
-    margin: 1.5rem 0 0.75rem 0;
-    padding-bottom: 0.4rem;
-    border-bottom: 2px solid #F0E6D8;
-}
-
-/* Hero header */
-.hero-header {
-    font-family: 'Inter', sans-serif;
-    font-size: 2.2rem;
-    font-weight: 700;
-    color: #3D405B;
-    margin-bottom: 0.15rem;
-    letter-spacing: -0.02em;
-}
-.hero-subtitle {
-    font-family: 'Inter', sans-serif;
-    font-size: 1.05rem;
-    color: #8D8D9B;
-    margin-bottom: 1.5rem;
-    line-height: 1.5;
-}
-
-/* Chart card label */
-.chart-label {
-    font-family: 'Inter', sans-serif;
-    font-size: 1rem;
-    font-weight: 600;
-    color: #3D405B;
-    text-align: center;
-    margin-bottom: 0.25rem;
-}
-
-/* Sidebar divider */
 .sidebar-divider {
     border: none;
-    border-top: 1px solid #E8DDD0;
-    margin: 1rem 0;
+    border-top: 1px solid rgba(24, 50, 47, 0.08);
+    margin: 1.1rem 0 1.25rem;
 }
 
-/* Sidebar branding */
 .sidebar-brand {
-    font-family: 'Inter', sans-serif;
-    text-align: center;
-    padding: 0.5rem 0 0.25rem 0;
-    font-size: 1.15rem;
+    padding: 0.25rem 0 0.35rem;
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 1.2rem;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    color: var(--ink);
+}
+
+.sidebar-brand-subtitle {
+    font-size: 0.78rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-top: 0.15rem;
+}
+
+.section-header {
+    font-size: 0.8rem;
+    font-weight: 800;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+}
+
+.page-hero {
+    position: relative;
+    overflow: hidden;
+    padding: 2rem 2.2rem;
+    margin-bottom: 1.25rem;
+    border-radius: var(--radius-xl);
+    border: 1px solid rgba(255, 255, 255, 0.65);
+    background:
+        linear-gradient(135deg, rgba(255,255,255,0.82) 0%, rgba(255,246,239,0.84) 52%, rgba(242,247,244,0.86) 100%);
+    box-shadow: var(--shadow);
+}
+
+.page-hero-copy {
+    position: relative;
+    z-index: 2;
+    max-width: 760px;
+}
+
+.eyebrow,
+.section-eyebrow {
+    font-size: 0.76rem;
+    font-weight: 800;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--accent);
+}
+
+.page-hero h1 {
+    margin: 0.45rem 0 0.45rem;
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: clamp(2.4rem, 4vw, 3.8rem);
+    line-height: 0.96;
+    letter-spacing: -0.05em;
+    color: var(--ink);
+}
+
+.page-hero p {
+    max-width: 640px;
+    margin: 0;
+    font-size: 1.02rem;
+    line-height: 1.65;
+    color: var(--muted);
+}
+
+.context-chip-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.65rem;
+    margin-top: 1.15rem;
+}
+
+.context-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.52rem 0.9rem;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.66);
+    border: 1px solid rgba(24, 50, 47, 0.08);
+    color: var(--ink);
+    font-size: 0.88rem;
     font-weight: 600;
-    color: #3D405B;
+}
+
+.hero-orb {
+    position: absolute;
+    border-radius: 999px;
+    filter: blur(2px);
+}
+
+.hero-orb-a {
+    width: 260px;
+    height: 260px;
+    right: -80px;
+    top: -80px;
+    background: radial-gradient(circle, rgba(217, 107, 66, 0.28), rgba(217, 107, 66, 0));
+}
+
+.hero-orb-b {
+    width: 220px;
+    height: 220px;
+    right: 120px;
+    bottom: -120px;
+    background: radial-gradient(circle, rgba(122, 157, 141, 0.24), rgba(122, 157, 141, 0));
+}
+
+.stat-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 1rem;
+    margin: 1rem 0 1.6rem;
+}
+
+.stat-card {
+    padding: 1.15rem 1.2rem 1.1rem;
+    border-radius: var(--radius-lg);
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    box-shadow: var(--shadow);
+    backdrop-filter: blur(10px);
+}
+
+.stat-label {
+    font-size: 0.8rem;
+    font-weight: 800;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+}
+
+.stat-value {
+    margin-top: 0.35rem;
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: clamp(1.7rem, 2vw, 2.4rem);
+    line-height: 1;
+    letter-spacing: -0.05em;
+    color: var(--ink);
+}
+
+.stat-footnote {
+    margin-top: 0.55rem;
+    font-size: 0.9rem;
+    color: var(--muted);
+    line-height: 1.45;
+}
+
+.section-shell {
+    margin: 1.7rem 0 0.9rem;
+}
+
+.section-title {
+    margin-top: 0.22rem;
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 1.55rem;
+    font-weight: 700;
+    letter-spacing: -0.04em;
+    color: var(--ink);
+}
+
+.section-shell p {
+    max-width: 760px;
+    margin: 0.28rem 0 0;
+    color: var(--muted);
+    line-height: 1.55;
+}
+
+.chart-card-title {
+    margin: 0.2rem 0 0.45rem;
+    padding: 0 0.15rem;
+    font-size: 1rem;
+    font-weight: 700;
     letter-spacing: -0.02em;
+    color: var(--ink);
+}
+
+.stButton > button,
+.stDownloadButton > button {
+    min-height: 2.9rem;
+    background: linear-gradient(135deg, var(--accent) 0%, var(--accent-dark) 100%) !important;
+    color: #fffdfb !important;
+    border: none !important;
+    border-radius: 14px !important;
+    font-weight: 700 !important;
+    padding: 0.65rem 1.1rem !important;
+    box-shadow: 0 12px 28px rgba(217, 107, 66, 0.22);
+    transition: transform 0.18s ease, box-shadow 0.18s ease, filter 0.18s ease;
+}
+
+.stButton > button:hover,
+.stDownloadButton > button:hover {
+    transform: translateY(-1px);
+    filter: saturate(1.05);
+    box-shadow: 0 14px 30px rgba(217, 107, 66, 0.26);
+}
+
+.stTextInput input,
+.stSelectbox [data-baseweb="select"] > div,
+.stMultiSelect [data-baseweb="select"] > div,
+.stDateInput input,
+.stFileUploader section {
+    background: rgba(255, 255, 255, 0.82) !important;
+    border: 1px solid rgba(24, 50, 47, 0.1) !important;
+    border-radius: 16px !important;
+}
+
+.stSlider [data-baseweb="slider"] > div > div {
+    background: var(--accent) !important;
+}
+
+div[data-testid="stDataFrame"],
+div[data-testid="stPlotlyChart"],
+div[data-testid="stMetric"] {
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--panel-border);
+    overflow: hidden;
+    box-shadow: var(--shadow);
+    background: var(--panel-strong);
+}
+
+div[data-testid="stPlotlyChart"] {
+    padding: 0.4rem 0.45rem 0.2rem;
+}
+
+div[data-testid="stDataFrame"] {
+    backdrop-filter: blur(10px);
+}
+
+div[data-testid="stMetric"] {
+    padding: 1rem 1.15rem !important;
+    border-left: none;
+}
+
+div[data-testid="stMetric"] label {
+    color: var(--muted) !important;
+    font-size: 0.78rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+}
+
+div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
+    color: var(--ink) !important;
+    font-family: 'Space Grotesk', sans-serif;
+    font-weight: 700;
+    letter-spacing: -0.04em;
+}
+
+.stTabs [data-baseweb="tab-list"] {
+    gap: 0.5rem;
+}
+
+.stTabs [data-baseweb="tab"] {
+    border-radius: 999px;
+    padding: 0.55rem 1rem;
+    background: rgba(255, 255, 255, 0.58);
+}
+
+.stTabs [aria-selected="true"] {
+    background: var(--accent-soft) !important;
+    color: var(--ink) !important;
+}
+
+.stAlert {
+    border-radius: 18px;
+    border: 1px solid rgba(24, 50, 47, 0.08);
+    box-shadow: var(--shadow);
+}
+
+.stCaption {
+    color: var(--muted);
+}
+
+@media (max-width: 980px) {
+    .stat-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .page-hero {
+        padding: 1.4rem 1.2rem;
+    }
+
+    .page-hero h1 {
+        font-size: 2.3rem;
+    }
 }
 </style>
 """, unsafe_allow_html=True)
 
 # ---- Sidebar navigation ----
 with st.sidebar:
-    st.markdown('<div class="sidebar-brand">Health Explorer</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="sidebar-brand">Personal Biomarker Studio</div>',
+        unsafe_allow_html=True,
+    )
     st.markdown('<hr class="sidebar-divider">', unsafe_allow_html=True)
 
     page = st.radio(
-        "Navigate",
-        ["Blood Panel", "Fitbit Data", "Fitbit Config"],
+        "Navigation",
+        ["Blood Panel", "Fitbit Data", "Settings"],
         label_visibility="collapsed",
+        key="page_nav",
     )
 
 # ---- Handle Fitbit OAuth redirect (before page routing) ----
@@ -1341,9 +1698,11 @@ if _oauth_code:
             st.query_params.clear()
 
 # ---- Route to selected page ----
-if page == "Blood Panel":
-    page_blood_panel()
-elif page == "Fitbit Data":
-    page_fitbit_data()
-elif page == "Fitbit Config":
-    page_fitbit_config()
+page_root = st.empty()
+with page_root.container():
+    if page == "Blood Panel":
+        page_blood_panel()
+    elif page == "Fitbit Data":
+        page_fitbit_data()
+    elif page == "Settings":
+        page_settings()
