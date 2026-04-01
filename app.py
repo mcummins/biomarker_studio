@@ -890,26 +890,25 @@ def page_fitbit_data():
                 latest_dates.append(pd.to_datetime(df.iloc[-1]['Date']))
         if latest_dates:
             most_recent = max(latest_dates)
-            render_chip_row([
-                f"Latest sync point: {format_display_date(most_recent)}",
-                f"Live datasets: {sum(0 if df.empty else 1 for df in all_dfs)} of {len(all_dfs)}",
-                "Automatic cached fallback enabled",
-            ])
-            k1, k2, k3 = st.columns(3)
-            with k1:
-                st.metric("Latest data point", format_display_date(most_recent))
-                st.caption("Most recent Fitbit date available across all feeds")
-            with k2:
-                st.metric("Feeds live", str(sum(0 if df.empty else 1 for df in all_dfs)))
-                st.caption("Weight, recovery, sleep, and activity feeds currently available")
-            with k3:
-                st.metric("Dashboard mode", "Resilient sync")
-                st.caption("Partial outages fall back to cached history instead of blanking the page")
+            stalest_feed_date = min(latest_dates)
+            if stalest_feed_date == most_recent:
+                k1 = st.columns(1)[0]
+                with k1:
+                    st.metric("Latest data point", format_display_date(most_recent))
+                    st.caption("Most recent Fitbit date available across all feeds")
+            else:
+                k1, k2 = st.columns(2)
+                with k1:
+                    st.metric("Latest data point", format_display_date(most_recent))
+                    st.caption("Most recent Fitbit date available across all feeds")
+                with k2:
+                    st.metric("Stalest feed", format_display_date(stalest_feed_date))
+                    st.caption("Oldest last-available date across the Fitbit feeds shown here")
 
         # ==================================================================
         # WEIGHT SECTION
         # ==================================================================
-        render_section_header("Weight", "Body mass trends with a clean daily signal and moving average.", "Body composition")
+        render_section_header("Weight", "", "Body composition")
         if not weight_df.empty:
             k1, k2 = st.columns([1, 3])
             with k1:
@@ -924,7 +923,7 @@ def page_fitbit_data():
         # ==================================================================
         # HEALTH METRICS SECTION
         # ==================================================================
-        render_section_header("Health Metrics", "Recovery markers that help frame stress, readiness, and baseline physiology.", "Recovery")
+        render_section_header("Health Metrics", "", "Recovery")
 
         hm1, hm2, hm3 = st.columns(3)
         with hm1:
@@ -976,7 +975,7 @@ def page_fitbit_data():
         # ==================================================================
         # SLEEP SECTION
         # ==================================================================
-        render_section_header("Sleep", "Duration, quality, and stage distribution in a format that feels like a premium wearable app.", "Rest")
+        render_section_header("Sleep", "", "Rest")
         if not sleep_df.empty:
             sl1, sl2, sl3 = st.columns(3)
             with sl1:
@@ -1031,7 +1030,7 @@ def page_fitbit_data():
         # ==================================================================
         # ACTIVITY SECTION
         # ==================================================================
-        render_section_header("Activity", "Movement, calories, and intensity minutes with clearer pacing and emphasis.", "Movement")
+        render_section_header("Activity", "", "Movement")
         if not activity_df.empty:
             a1, a2, a3, a4 = st.columns(4)
             with a1:
@@ -1084,7 +1083,7 @@ def page_fitbit_data():
         # ==================================================================
         # RAW DATA
         # ==================================================================
-        render_section_header("Raw Data", "Detailed tables for inspection when you want the underlying records, not just the polished summary.", "Audit trail")
+        render_section_header("Raw Data", "", "Audit trail")
         tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Weight", "HRV", "RHR", "Breathing Rate", "Sleep", "Activity"])
         with tab1:
             if not weight_df.empty:
@@ -1123,7 +1122,7 @@ def page_fitbit_data():
         with loading_placeholder.container():
             render_section_header(
                 "Loading Fitbit",
-                "Syncing Fitbit metrics now. The dashboard stays usable while fresh data is pulled in.",
+                "",
                 "Sync in progress",
             )
             progress_text = st.empty()
