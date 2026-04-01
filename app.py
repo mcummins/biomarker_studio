@@ -82,6 +82,18 @@ def parse_value(raw) -> Tuple[Optional[float], Optional[str], Optional[str]]:
         # non numeric, return None but keep raw
         return None, None, s
 
+
+def format_lab_number(value) -> str:
+    if pd.isna(value):
+        return "—"
+    value = float(value)
+    abs_value = abs(value)
+    if abs_value == 0:
+        return "0"
+    if abs_value < 0.1:
+        return f"{value:.3f}"
+    return f"{value:.2f}"
+
 def normalize_all_data(df: pd.DataFrame) -> pd.DataFrame:
     # Detect date columns dynamically
     date_cols = detect_date_cols(df.columns)
@@ -176,6 +188,8 @@ def highlight_status(status):
     """Return background-color CSS for a full row based on status."""
     if status == "normal":
         return "background-color: rgba(129, 178, 154, 0.3)"  # sage green
+    if status in ("high but improved", "low but improved"):
+        return "background-color: rgba(242, 204, 143, 0.35)"  # soft amber
     if status in ("high", "low"):
         return "background-color: rgba(224, 122, 95, 0.3)"  # soft rose
     return ""
@@ -525,7 +539,7 @@ def format_display_date(value, fmt: str = "%d %b %Y", empty: str = "No data") ->
     return pd.to_datetime(value).strftime(fmt)
 
 
-def render_page_hero(title: str, subtitle: str, pills: Optional[List[str]] = None, eyebrow: str = "Health Atlas"):
+def render_page_hero(title: str, subtitle: str, pills: Optional[List[str]] = None, eyebrow: str = "Biomarker Studio"):
     st.markdown(
         f"""
         <section class="page-hero">
@@ -571,7 +585,7 @@ def page_blood_panel():
         "Blood Panel",
         "A polished view of your longitudinal lab results, reference ranges, and recent changes across every marker that matters.",
         pills=["Longitudinal trends", "Reference zones", "Consumer-grade detail"],
-        eyebrow="Health Atlas",
+        eyebrow="Biomarker Studio",
     )
 
     with st.sidebar:
@@ -701,6 +715,7 @@ def page_blood_panel():
     else:
         latest_idx = dsel.groupby("test")["Date"].idxmax()
         latest_per_test = dsel.loc[latest_idx].copy()
+        latest_per_test = latest_per_test[latest_per_test["Date"] == latest_date].copy()
 
         # If any selected test has no previous value in the selection, fill from full history
         needs_prev = latest_per_test["PrevValue"].isna()
@@ -715,19 +730,36 @@ def page_blood_panel():
         # Build view
         latest_per_test["Δ"]  = (latest_per_test["Value"] - latest_per_test["PrevValue"]).round(2)
         latest_per_test["Δ%"] = (latest_per_test["Δ"] / latest_per_test["PrevValue"] * 100).round(1)
+        latest_per_test["display_status"] = latest_per_test["status"]
+        improved_high = (latest_per_test["status"] == "high") & (latest_per_test["Δ"] < 0)
+        improved_low = (latest_per_test["status"] == "low") & (latest_per_test["Δ"] > 0)
+        latest_per_test.loc[improved_high, "display_status"] = "high but improved"
+        latest_per_test.loc[improved_low, "display_status"] = "low but improved"
+        latest_per_test["status_order"] = latest_per_test["display_status"].map({
+            "high": 0,
+            "low": 0,
+            "high but improved": 1,
+            "low but improved": 1,
+            "normal": 2,
+            "unknown": 3,
+        }).fillna(3)
 
-        cols = ["test","unit","PrevValue","Value","Δ","Δ%","status"]
-        table_df = latest_per_test.sort_values("Δ%", ascending=False)[cols].reset_index(drop=True)
+        cols = ["test","unit","PrevValue","Value","Δ","Δ%","display_status"]
+        table_df = (
+            latest_per_test
+            .sort_values(["status_order", "Δ%"], ascending=[True, False], na_position="last")[cols]
+            .reset_index(drop=True)
+        )
 
         # Friendly column names
         table_df = table_df.rename(columns={
             "test": "Test", "unit": "Unit", "PrevValue": "Previous",
-            "Value": "Current", "Δ": "Change", "Δ%": "Change %", "status": "Status",
+            "Value": "Current", "Δ": "Change", "Δ%": "Change %", "display_status": "Status",
         })
 
         # Format numeric columns
         for c in ["Previous", "Current", "Change"]:
-            table_df[c] = table_df[c].apply(lambda v: f"{v:.2f}" if pd.notna(v) else "—")
+            table_df[c] = table_df[c].apply(format_lab_number)
         table_df["Change %"] = table_df["Change %"].apply(lambda v: f"{v:+.1f}%" if pd.notna(v) else "—")
 
         # Apply full-row tinting based on status
@@ -1274,7 +1306,7 @@ def page_settings():
 # MAIN APP — page config, global CSS, sidebar nav
 # =====================================================================
 
-st.set_page_config(page_title="Health Atlas", layout="wide")
+st.set_page_config(page_title="Biomarker Studio", layout="wide")
 
 # ---- Global CSS ----
 st.markdown("""
