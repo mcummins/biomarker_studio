@@ -202,6 +202,64 @@ def compute_zscore(value, lower, upper) -> Optional[float]:
             return (value - mid) / half_width
     return None
 
+
+def compute_heatmap_health_score(value, lower, upper, borderline=None) -> Optional[float]:
+    """Return a score in [-1, 1] for heatmap coloring.
+
+    Negative values are out-of-range (red).
+    Values near 0 are borderline (yellow).
+    Positive values are safely in-range (green).
+    """
+    if pd.isna(value):
+        return None
+
+    has_lower = pd.notna(lower)
+    has_upper = pd.notna(upper)
+    if not has_lower and not has_upper:
+        return None
+
+    if has_lower and has_upper:
+        span = upper - lower
+        if span <= 0:
+            return None
+        scale = max(span / 2.0, 1e-9)
+        if lower <= value <= upper:
+            if pd.notna(borderline) and lower < borderline < upper:
+                if value <= borderline:
+                    optimal_span = max(borderline - lower, 1e-9)
+                    return float(0.25 + 0.75 * min((value - lower) / optimal_span, 1.0))
+                borderline_span = max(upper - borderline, 1e-9)
+                # Borderline stays near yellow, trending toward red as it nears upper.
+                return float(0.15 * max(1.0 - ((value - borderline) / borderline_span), 0.0))
+            distance = min(value - lower, upper - value)
+            return float(min(distance / scale, 1.0))
+        if value < lower:
+            return float(-min((lower - value) / scale, 1.0))
+        return float(-min((value - upper) / scale, 1.0))
+
+    if has_lower:
+        scale = max(abs(lower), 1.0)
+        if value >= lower:
+            if pd.notna(borderline) and borderline > lower:
+                if value < borderline:
+                    borderline_span = max(borderline - lower, 1e-9)
+                    return float(0.15 * min((value - lower) / borderline_span, 1.0))
+                optimal_span = max(scale, 1e-9)
+                return float(0.25 + 0.75 * min((value - borderline) / optimal_span, 1.0))
+            return float(min((value - lower) / scale, 1.0))
+        return float(-min((lower - value) / scale, 1.0))
+
+    scale = max(abs(upper), 1.0)
+    if value <= upper:
+        if pd.notna(borderline) and borderline < upper:
+            if value <= borderline:
+                optimal_span = max(scale, 1e-9)
+                return float(0.25 + 0.75 * min((borderline - value) / optimal_span, 1.0))
+            borderline_span = max(upper - borderline, 1e-9)
+            return float(0.15 * max(1.0 - ((value - borderline) / borderline_span), 0.0))
+        return float(min((upper - value) / scale, 1.0))
+    return float(-min((value - upper) / scale, 1.0))
+
 def compute_deltas(df: pd.DataFrame) -> pd.DataFrame:
     df = df.sort_values(["test","Date"])
     df["PrevValue"] = df.groupby("test")["Value"].shift(1)
@@ -257,7 +315,7 @@ def load_groups_from_sheets(all_sheets: Dict[str, pd.DataFrame]) -> Dict[str, Li
 # -----------------------------
 # Data loaders
 # -----------------------------
-@st.cache_data(show_spinner=False, ttl=600)
+@st.cache_data(show_spinner=False, ttl=86400)
 def load_from_gsheets(spreadsheet_id: str, service_account_info: dict) -> Dict[str, pd.DataFrame]:
     import gspread
     from google.oauth2.service_account import Credentials
@@ -447,23 +505,37 @@ def plot_single_test(df: pd.DataFrame, test: str,
 
 
 def plot_heatmap(df: pd.DataFrame, tests: List[str]) -> go.Figure:
-    # Build matrix of z-scores by date
+    # Build matrix of health scores by date.
     g = df[df["test"].isin(tests)].copy()
-    g["z"] = g.apply(lambda r: compute_zscore(r["Value"], r.get("lower"), r.get("upper")), axis=1)
-    g = g.dropna(subset=["z"])
+    g["health_score"] = g.apply(
+        lambda r: compute_heatmap_health_score(
+            r["Value"], r.get("lower"), r.get("upper"), r.get("borderline")
+        ),
+        axis=1,
+    )
+    g = g.dropna(subset=["health_score"])
     if g.empty:
         return go.Figure()
-    pivot = g.pivot_table(index="test", columns="Date", values="z", aggfunc="mean")
-    pivot = pivot.sort_index()
+    pivot = g.pivot_table(index="test", columns="Date", values="health_score", aggfunc="mean")
+    ordered_tests = [test for test in tests if test in pivot.index]
+    pivot = pivot.reindex(list(reversed(ordered_tests)))
     warm_scale = [
-        [0.0, "#E07A5F"],   # rose (low)
-        [0.35, "#F2CC8F"],  # amber
-        [0.5, "#FFF8F2"],   # warm off-white (center)
-        [0.65, "#C8DFC8"],  # light sage
-        [1.0, "#81B29A"],   # sage green (high/normal)
+        [0.0, "#D96B42"],   # out of range
+        [0.25, "#F1B07B"],  # slightly out of range
+        [0.5, "#F2CC8F"],   # borderline
+        [0.75, "#BED8C7"],  # safely in range
+        [1.0, "#6F9A86"],   # strongly in range
     ]
-    fig = px.imshow(pivot, aspect="auto", origin="lower", color_continuous_scale=warm_scale, labels=dict(color="Z vs range"))
-    fig.update_layout(height=300 + 20*len(pivot), margin=dict(l=10,r=10,t=40,b=40), title="Heatmap: position vs reference range")
+    fig = px.imshow(
+        pivot,
+        aspect="auto",
+        origin="lower",
+        zmin=-1,
+        zmax=1,
+        color_continuous_scale=warm_scale,
+        labels=dict(color="Health vs cutoff"),
+    )
+    fig.update_layout(height=300 + 20*len(pivot), margin=dict(l=10,r=10,t=40,b=40), title="Heatmap: distance from healthy range")
     apply_warm_theme(fig)
     return fig
 
@@ -581,12 +653,7 @@ def render_chip_row(chips: List[str]):
 
 def page_blood_panel():
     """Original Blood Panel Explorer page — all existing logic intact."""
-    render_page_hero(
-        "Blood Panel",
-        "A polished view of your longitudinal lab results, reference ranges, and recent changes across every marker that matters.",
-        pills=["Longitudinal trends", "Reference zones", "Consumer-grade detail"],
-        eyebrow="Biomarker Studio",
-    )
+    hero_placeholder = st.empty()
 
     with st.sidebar:
         # Convenience: auto-load local sheet_api_key.json if present
@@ -660,11 +727,22 @@ def page_blood_panel():
     group_names = ["(All)"] + list(groups.keys())
     st.sidebar.markdown('<hr class="sidebar-divider">', unsafe_allow_html=True)
     st.sidebar.markdown('<div class="section-header" style="border-bottom:none; margin-top:0.5rem; font-size:1.1rem;">Category</div>', unsafe_allow_html=True)
-    grp = st.sidebar.selectbox("Category", options=group_names)
+    default_group = "Inflamation"
+    default_index = group_names.index(default_group) if default_group in group_names else 0
+    grp = st.sidebar.selectbox("Category", options=group_names, index=default_index)
     if grp != "(All)":
         selected_tests = groups.get(grp, [])
     else:
         selected_tests = sorted(merged["test"].unique().tolist())
+
+    hero_title = grp if grp != "(All)" else "Blood Panel"
+    with hero_placeholder.container():
+        render_page_hero(
+            hero_title,
+            "A polished view of your longitudinal lab results, reference ranges, and recent changes across every marker that matters.",
+            pills=["Longitudinal trends", "Reference zones", "Consumer-grade detail"],
+            eyebrow="Biomarker Studio",
+        )
 
     with st.sidebar.expander("Filters", expanded=False):
         search = st.text_input("Search test name")
@@ -807,7 +885,7 @@ def page_blood_panel():
     render_section_header(
         "Overview Heatmap",
         "A quick read on how your selected markers sit within their reference bands over time.",
-        "Portfolio view",
+        "Trends",
     )
     if len(tests_selected) >= 2:
         fig_hm = plot_heatmap(data, tests_selected[:30])  # limit to 30 for readability
@@ -842,7 +920,7 @@ def page_blood_panel():
 def page_fitbit_data():
     """Fitbit data visualization page — weight, HRV, and RHR."""
     render_page_hero(
-        "Fitbit Sync",
+        "Fitbit Data",
         "A calm, consumer-grade dashboard for recovery, sleep, movement, and body metrics streamed from Fitbit.",
         pills=["Daily rhythm", "Recovery signals", "Activity patterns"],
         eyebrow="Connected health",
@@ -1215,6 +1293,9 @@ def page_settings():
     else:
         st.info("No local Google Sheets key detected. The blood panel page will prompt for a service account file.")
     st.caption(f"Default spreadsheet ID: `{spreadsheet_id}`")
+    if st.button("Force refresh Google Sheets"):
+        load_from_gsheets.clear()
+        st.success("Google Sheets cache cleared. The next Blood Panel visit will fetch fresh data.")
 
     # Status
     render_section_header("Connection Status", "A quick health check of your local Fitbit connection and token state.", "Setup")
