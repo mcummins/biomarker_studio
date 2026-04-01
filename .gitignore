@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# macOS
+.DS_Store
+
+# Secrets & credentials
+fitbit_config.json
+sheet_api_key.json
+
+# Fitbit cached data
+.fitbit_cache/
+
+# IDE / editor
+.claude/
+
+# Misc
+=2.31
