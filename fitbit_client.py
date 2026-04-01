@@ -237,8 +237,20 @@ def _get_member_since() -> date:
 # On fetch, we only request data from (last_cached_date + 1) to today.
 # ---------------------------------------------------------------------------
 
+CACHE_MAX_AGE_SECONDS = 86400  # Skip API calls if cache is less than 24 hours old
+
+
 def _cache_path(metric: str) -> str:
     return os.path.join(CACHE_DIR, f"{metric}.json")
+
+
+def _cache_is_fresh(metric: str) -> bool:
+    """Return True if the cache file exists and was written recently."""
+    path = _cache_path(metric)
+    if not os.path.exists(path):
+        return False
+    age = datetime.now().timestamp() - os.path.getmtime(path)
+    return age < CACHE_MAX_AGE_SECONDS
 
 
 def _load_cache(metric: str) -> List[Dict]:
@@ -266,7 +278,11 @@ def _last_cached_date(metric: str) -> Optional[date]:
 
 
 def _resolve_fetch_start(metric, cached, start_date, force_full):
-    """Common logic to determine fetch start date."""
+    """Common logic to determine fetch start date.
+    Returns None if cache is fresh and no fetch is needed.
+    """
+    if not force_full and _cache_is_fresh(metric) and cached:
+        return None
     last = _last_cached_date(metric) if cached else None
     if last and not force_full:
         return last + timedelta(days=1)
@@ -285,6 +301,8 @@ def fetch_weight(start_date: Optional[str] = None, force_full: bool = False,
     metric = "weight"
     cached = [] if force_full else _load_cache(metric)
     fetch_start = _resolve_fetch_start(metric, cached, start_date, force_full)
+    if fetch_start is None:
+        return _weight_records_to_df(cached)
 
     today = date.today()
     if fetch_start > today:
@@ -342,6 +360,8 @@ def fetch_hrv(start_date: Optional[str] = None, force_full: bool = False,
     metric = "hrv"
     cached = [] if force_full else _load_cache(metric)
     fetch_start = _resolve_fetch_start(metric, cached, start_date, force_full)
+    if fetch_start is None:
+        return _hrv_records_to_df(cached)
 
     today = date.today()
     if fetch_start > today:
@@ -399,6 +419,8 @@ def fetch_rhr(start_date: Optional[str] = None, force_full: bool = False,
     metric = "rhr"
     cached = [] if force_full else _load_cache(metric)
     fetch_start = _resolve_fetch_start(metric, cached, start_date, force_full)
+    if fetch_start is None:
+        return _rhr_records_to_df(cached)
 
     today = date.today()
     if fetch_start > today:
@@ -454,6 +476,8 @@ def fetch_breathing_rate(start_date: Optional[str] = None, force_full: bool = Fa
     metric = "breathing_rate"
     cached = [] if force_full else _load_cache(metric)
     fetch_start = _resolve_fetch_start(metric, cached, start_date, force_full)
+    if fetch_start is None:
+        return _breathing_rate_records_to_df(cached)
 
     today = date.today()
     if fetch_start > today:
@@ -510,6 +534,8 @@ def fetch_sleep(start_date: Optional[str] = None, force_full: bool = False,
     metric = "sleep"
     cached = [] if force_full else _load_cache(metric)
     fetch_start = _resolve_fetch_start(metric, cached, start_date, force_full)
+    if fetch_start is None:
+        return _sleep_records_to_df(cached)
 
     today = date.today()
     if fetch_start > today:
@@ -591,6 +617,8 @@ def fetch_sleep_score(start_date: Optional[str] = None, force_full: bool = False
     metric = "sleep_score"
     cached = [] if force_full else _load_cache(metric)
     fetch_start = _resolve_fetch_start(metric, cached, start_date, force_full)
+    if fetch_start is None:
+        return _sleep_score_records_to_df(cached)
 
     today = date.today()
     if fetch_start > today:
@@ -653,6 +681,8 @@ def fetch_activity(start_date: Optional[str] = None, force_full: bool = False,
     metric = "activity"
     cached = [] if force_full else _load_cache(metric)
     fetch_start = _resolve_fetch_start(metric, cached, start_date, force_full)
+    if fetch_start is None:
+        return _activity_records_to_df(cached)
 
     today = date.today()
     if fetch_start > today:
