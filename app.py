@@ -744,7 +744,7 @@ def page_blood_panel():
             "unknown": 3,
         }).fillna(3)
 
-        cols = ["test","unit","PrevValue","Value","Δ","Δ%","display_status"]
+        cols = ["test","PrevValue","Value","Δ%","display_status","unit"]
         table_df = (
             latest_per_test
             .sort_values(["status_order", "Δ%"], ascending=[True, False], na_position="last")[cols]
@@ -753,12 +753,12 @@ def page_blood_panel():
 
         # Friendly column names
         table_df = table_df.rename(columns={
-            "test": "Test", "unit": "Unit", "PrevValue": "Previous",
-            "Value": "Current", "Δ": "Change", "Δ%": "Change %", "display_status": "Status",
+            "test": "Test", "PrevValue": "Previous",
+            "Value": "Current", "Δ%": "Change %", "display_status": "Status", "unit": "Unit",
         })
 
         # Format numeric columns
-        for c in ["Previous", "Current", "Change"]:
+        for c in ["Previous", "Current"]:
             table_df[c] = table_df[c].apply(format_lab_number)
         table_df["Change %"] = table_df["Change %"].apply(lambda v: f"{v:+.1f}%" if pd.notna(v) else "—")
 
@@ -766,6 +766,15 @@ def page_blood_panel():
         styled = table_df.style.apply(
             lambda row: [highlight_status(row["Status"])] * len(row),
             axis=1,
+        )
+        styled = styled.set_properties(
+            subset=["Unit"],
+            **{
+                "color": "#7A7F8C",
+                "background-color": "rgba(61, 64, 91, 0.06)",
+                "font-size": "0.85rem",
+                "white-space": "nowrap",
+            },
         )
 
         st.dataframe(styled, use_container_width=True, hide_index=True)
