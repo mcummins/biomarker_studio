@@ -663,6 +663,14 @@ def format_fitbit_metric_value(
     return f"{number} {unit}"
 
 
+def formatted_fitbit_value_is_zero(display_value: str) -> bool:
+    match = re.match(r"^[+-]?([0-9,]+(?:\.[0-9]+)?)", display_value.strip())
+    if not match:
+        return False
+    numeric_value = float(match.group(1).replace(",", ""))
+    return numeric_value == 0.0
+
+
 def compute_fitbit_trend_per_month(df: pd.DataFrame, value_col: str) -> Optional[float]:
     """Estimate a meaningful linear trend over the visible window."""
     if df.empty or value_col not in df.columns:
@@ -714,15 +722,21 @@ def render_fitbit_metric_stack(
     average_title: str,
     trend_title: str,
     value_formatter,
-    trend_formatter,
+    trend_month_formatter,
+    trend_year_formatter,
     trend_layout: str = "stacked",
 ) -> None:
     """Render an average card plus an optional visible-window trend card."""
-    def render_metric_card(title: str, value: str, latest_text: Optional[str] = None) -> None:
+    def render_metric_card(
+        title: str,
+        value: str,
+        latest_text: Optional[str] = None,
+        variant: str = "primary",
+    ) -> None:
         latest_html = f"<div class='fitbit-metric-latest'>{latest_text}</div>" if latest_text else ""
         st.markdown(
             f"""
-            <div class="fitbit-metric-card">
+            <div class="fitbit-metric-card fitbit-metric-card--{variant}">
                 <div class="fitbit-metric-title">{title}</div>
                 <div class="fitbit-metric-value">{value}</div>
                 {latest_html}
@@ -743,8 +757,16 @@ def render_fitbit_metric_stack(
     average_value = data[value_col].mean()
     latest_value = data.iloc[-1][value_col]
     trend_per_month = compute_fitbit_trend_per_month(data, value_col)
+    trend_value = None
+    if trend_per_month is not None:
+        if abs(trend_per_month) < 0.1:
+            trend_value = trend_year_formatter(trend_per_month * 12)
+        else:
+            trend_value = trend_month_formatter(trend_per_month)
+        if formatted_fitbit_value_is_zero(trend_value):
+            trend_value = None
 
-    if trend_layout == "inline" and trend_per_month is not None:
+    if trend_layout == "inline" and trend_value is not None:
         avg_col, trend_col = st.columns(2)
         with avg_col:
             render_metric_card(
@@ -755,7 +777,8 @@ def render_fitbit_metric_stack(
         with trend_col:
             render_metric_card(
                 trend_title,
-                trend_formatter(trend_per_month),
+                trend_value,
+                variant="trend",
             )
         return
 
@@ -765,10 +788,11 @@ def render_fitbit_metric_stack(
         f"Latest: {value_formatter(latest_value)}",
     )
 
-    if trend_per_month is not None:
+    if trend_value is not None:
         render_metric_card(
             trend_title,
-            trend_formatter(trend_per_month),
+            trend_value,
+            variant="trend",
         )
 
 
@@ -1431,6 +1455,7 @@ def page_fitbit_data():
                     "Weight Trend",
                     lambda v: format_fitbit_metric_value(v, "kg", 1),
                     lambda v: format_fitbit_metric_value(v, "kg / month", 1, signed=True),
+                    lambda v: format_fitbit_metric_value(v, "kg / year", 1, signed=True),
                     trend_layout="inline",
                 )
             fig_w = plot_fitbit_timeseries(weight_chart_df, "Weight", "Weight", "kg", color="#E07A5F", show_trend=show_trend, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None)
@@ -1452,6 +1477,7 @@ def page_fitbit_data():
                 "HRV Trend",
                 lambda v: format_fitbit_metric_value(v, "ms", 0),
                 lambda v: format_fitbit_metric_value(v, "ms / month", 1, signed=True),
+                lambda v: format_fitbit_metric_value(v, "ms / year", 1, signed=True),
             )
         with hm2:
             render_fitbit_metric_stack(
@@ -1461,6 +1487,7 @@ def page_fitbit_data():
                 "RHR Trend",
                 lambda v: format_fitbit_metric_value(v, "bpm", 0),
                 lambda v: format_fitbit_metric_value(v, "bpm / month", 1, signed=True),
+                lambda v: format_fitbit_metric_value(v, "bpm / year", 1, signed=True),
             )
         with hm3:
             render_fitbit_metric_stack(
@@ -1470,6 +1497,7 @@ def page_fitbit_data():
                 "Breathing Trend",
                 lambda v: format_fitbit_metric_value(v, "brpm", 1),
                 lambda v: format_fitbit_metric_value(v, "brpm / month", 2, signed=True),
+                lambda v: format_fitbit_metric_value(v, "brpm / year", 1, signed=True),
             )
 
         st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True)
@@ -1506,6 +1534,7 @@ def page_fitbit_data():
                     "Sleep Duration Trend",
                     lambda v: format_fitbit_metric_value(v, "hrs", 1),
                     lambda v: format_fitbit_metric_value(v, "hrs / month", 2, signed=True),
+                    lambda v: format_fitbit_metric_value(v, "hrs / year", 1, signed=True),
                 )
             with sl2:
                 render_fitbit_metric_stack(
@@ -1515,6 +1544,7 @@ def page_fitbit_data():
                     "Sleep Score Trend",
                     lambda v: format_fitbit_metric_value(v, "", 0),
                     lambda v: format_fitbit_metric_value(v, "points / month", 1, signed=True),
+                    lambda v: format_fitbit_metric_value(v, "points / year", 1, signed=True),
                 )
 
             st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True)
@@ -1554,6 +1584,7 @@ def page_fitbit_data():
                     "Steps Trend",
                     lambda v: format_fitbit_metric_value(v, "", 0),
                     lambda v: format_fitbit_metric_value(v, "steps / month", 0, signed=True),
+                    lambda v: format_fitbit_metric_value(v, "steps / year", 0, signed=True),
                 )
             with a2:
                 render_fitbit_metric_stack(
@@ -1563,6 +1594,7 @@ def page_fitbit_data():
                     "Zone Minutes Trend",
                     lambda v: format_fitbit_metric_value(v, "min", 0),
                     lambda v: format_fitbit_metric_value(v, "min / month", 1, signed=True),
+                    lambda v: format_fitbit_metric_value(v, "min / year", 1, signed=True),
                 )
             with a3:
                 render_fitbit_metric_stack(
@@ -1572,6 +1604,7 @@ def page_fitbit_data():
                     "Distance Trend",
                     lambda v: format_fitbit_metric_value(v, "km", 2),
                     lambda v: format_fitbit_metric_value(v, "km / month", 2, signed=True),
+                    lambda v: format_fitbit_metric_value(v, "km / year", 1, signed=True),
                 )
             with a4:
                 render_fitbit_metric_stack(
@@ -1581,6 +1614,7 @@ def page_fitbit_data():
                     "Calories Trend",
                     lambda v: format_fitbit_metric_value(v, "kcal", 0),
                     lambda v: format_fitbit_metric_value(v, "kcal / month", 0, signed=True),
+                    lambda v: format_fitbit_metric_value(v, "kcal / year", 0, signed=True),
                 )
 
             st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True)
@@ -1986,6 +2020,14 @@ section[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] > label:has(i
     margin-bottom: 0.7rem;
 }
 
+.fitbit-metric-card--trend {
+    background: linear-gradient(180deg, rgba(244, 240, 234, 0.82) 0%, rgba(239, 235, 229, 0.86) 100%);
+    border-color: rgba(24, 50, 47, 0.05);
+    box-shadow: none;
+    min-height: 96px;
+    padding: 0.8rem 0.95rem 0.72rem;
+}
+
 .fitbit-metric-title {
     font-size: 0.86rem;
     font-weight: 700;
@@ -2002,11 +2044,28 @@ section[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] > label:has(i
     letter-spacing: -0.04em;
 }
 
+.fitbit-metric-card--trend .fitbit-metric-title {
+    font-size: 0.8rem;
+    color: #7a7f8c;
+}
+
+.fitbit-metric-card--trend .fitbit-metric-value {
+    font-size: 1.32rem;
+    font-weight: 700;
+    color: #35524c;
+}
+
 .fitbit-metric-latest {
     margin-top: 0.55rem;
     font-size: 0.82rem;
     color: #7a7f8c;
     line-height: 1.35;
+}
+
+.fitbit-metric-card--trend .fitbit-metric-latest {
+    margin-top: 0.4rem;
+    font-size: 0.76rem;
+    color: #8a8f9b;
 }
 
 .page-hero {
