@@ -102,6 +102,16 @@ def format_lab_number(value) -> str:
         return f"{value:.3f}"
     return f"{value:.2f}"
 
+
+def latest_test_summary(df: pd.DataFrame, test: str) -> str:
+    data = df[df["test"] == test].sort_values("Date")
+    if data.empty:
+        return ""
+    latest = data.iloc[-1]
+    value = format_lab_number(latest["Value"])
+    unit = str(latest.get("unit", "")).strip()
+    return f"{value} {unit}".strip()
+
 def normalize_all_data(df: pd.DataFrame) -> pd.DataFrame:
     # Detect date columns dynamically
     date_cols = detect_date_cols(df.columns)
@@ -1254,7 +1264,15 @@ def page_blood_panel():
                     continue
                 t = tests_selected[idx]
                 with cols[i]:
-                    st.markdown(f"<div class='chart-card-title'>{t}</div>", unsafe_allow_html=True)
+                    latest_summary = latest_test_summary(data, t)
+                    summary_html = f"<div class='chart-card-meta'>Latest: {latest_summary}</div>" if latest_summary else ""
+                    st.markdown(
+                        f"""
+                        <div class='chart-card-title'>{t}</div>
+                        {summary_html}
+                        """,
+                        unsafe_allow_html=True,
+                    )
                     fig = plot_single_test(
                         data,
                         t,
@@ -2269,6 +2287,15 @@ section[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] > label:has(i
     font-weight: 700;
     letter-spacing: -0.02em;
     color: var(--ink);
+}
+
+.chart-card-meta {
+    margin: -0.15rem 0 0.5rem;
+    padding: 0 0.15rem;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: #7a7f8c;
+    letter-spacing: -0.01em;
 }
 
 .stButton > button,
