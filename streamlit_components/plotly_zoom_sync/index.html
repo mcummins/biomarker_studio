@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Plotly Zoom Sync</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 0;
+        overflow: hidden;
+        background: transparent;
+      }
+    </style>
+  </head>
+  <body>
+    <script>
+      const Streamlit = {
+        sendMessage(type, payload = {}) {
+          window.parent.postMessage(
+            {
+              isStreamlitMessage: true,
+              type,
+              ...payload,
+            },
+            "*"
+          );
+        },
+        setComponentReady() {
+          this.sendMessage("streamlit:componentReady", { apiVersion: 1 });
+        },
+        setFrameHeight(height = 0) {
+          this.sendMessage("streamlit:setFrameHeight", { height });
+        },
+        setComponentValue(value) {
+          this.sendMessage("streamlit:setComponentValue", {
+            value,
+            dataType: "json",
+          });
+        },
+      };
+
+      const state = {
+        args: {},
+        observer: null,
+        attachedPlots: new WeakSet(),
+        lastSignature: null,
+      };
+
+      function toDate(value) {
+        const date = new Date(value);
+        return Number.isNaN(date.getTime()) ? null : date;
+      }
+
+      function toDayIso(value) {
+        const date = toDate(value);
+        return date ? date.toISOString().slice(0, 10) : null;
+      }
+
+      function currentWindowSignature() {
+        if (state.args.currentPreset === "All time") {
+          return "all";
+        }
+        return `range:${state.args.currentStart || ""}:${state.args.currentEnd || ""}`;
+      }
+
+      function normalizeRange(start, end) {
+        let startDate = toDate(start);
+        let endDate = toDate(end);
+        if (!startDate || !endDate) {
+          return null;
+        }
+
+        if (startDate > endDate) {
+          const temp = startDate;
+          startDate = endDate;
+          endDate = temp;
+        }
+
+        const minDate = toDate(state.args.minDate);
+        const maxDate = toDate(state.args.maxDate);
+        if (minDate && startDate < minDate) {
+          startDate = minDate;
+        }
+        if (maxDate && endDate > maxDate) {
+          endDate = maxDate;
+        }
+        if (startDate > endDate) {
+          return null;
+        }
+
+        return {
+          start: startDate.toISOString().slice(0, 10),
+          end: endDate.toISOString().slice(0, 10),
+        };
+      }
+
+      function emitWindow(mode, start = null, end = null) {
+        const signature = mode === "all" ? "all" : `range:${start}:${end}`;
+        if (signature === state.lastSignature || signature === currentWindowSignature()) {
+          return;
+        }
+
+        state.lastSignature = signature;
+        Streamlit.setComponentValue({
+          eventId: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          scope: state.args.scope || "",
+          mode,
+          start,
+          end,
+        });
+      }
+
+      function emitAllTime() {
+        emitWindow("all");
+      }
+
+      function handleRelayout(eventData) {
+        if (!eventData || typeof eventData !== "object") {
+          return;
+        }
+
+        if (eventData["xaxis.autorange"] === true) {
+          emitAllTime();
+          return;
+        }
+
+        let start = eventData["xaxis.range[0]"];
+        let end = eventData["xaxis.range[1]"];
+
+        if ((!start || !end) && Array.isArray(eventData["xaxis.range"])) {
+          [start, end] = eventData["xaxis.range"];
+        }
+
+        if (!start || !end) {
+          return;
+        }
+
+        const range = normalizeRange(start, end);
+        if (!range) {
+          return;
+        }
+
+        if (range.start === state.args.minDate && range.end === state.args.maxDate) {
+          emitAllTime();
+          return;
+        }
+
+        emitWindow("range", range.start, range.end);
+      }
+
+      function attachToPlot(plot) {
+        if (!plot || state.attachedPlots.has(plot) || typeof plot.on !== "function") {
+          return;
+        }
+
+        state.attachedPlots.add(plot);
+        plot.on("plotly_relayout", handleRelayout);
+        plot.on("plotly_doubleclick", emitAllTime);
+      }
+
+      function attachToAllPlots() {
+        let parentDocument;
+        try {
+          parentDocument = window.parent.document;
+        } catch (error) {
+          return;
+        }
+
+        parentDocument.querySelectorAll(".js-plotly-plot").forEach(attachToPlot);
+      }
+
+      function ensureObserver() {
+        if (state.observer) {
+          return;
+        }
+
+        let parentDocument;
+        try {
+          parentDocument = window.parent.document;
+        } catch (error) {
+          return;
+        }
+
+        state.observer = new MutationObserver(() => {
+          attachToAllPlots();
+          Streamlit.setFrameHeight(0);
+        });
+        state.observer.observe(parentDocument.body, {
+          childList: true,
+          subtree: true,
+        });
+      }
+
+      window.addEventListener("message", (event) => {
+        if (event.source !== window.parent) {
+          return;
+        }
+
+        const data = event.data || {};
+        if (data.type !== "streamlit:render") {
+          return;
+        }
+
+        state.args = data.args || {};
+        state.lastSignature = currentWindowSignature();
+        ensureObserver();
+        attachToAllPlots();
+        Streamlit.setFrameHeight(0);
+      });
+
+      Streamlit.setComponentReady();
+      Streamlit.setFrameHeight(0);
+      ensureObserver();
+      attachToAllPlots();
+    </script>
+  </body>
+</html>

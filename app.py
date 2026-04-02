@@ -4,6 +4,7 @@ import io
 import json
 import urllib.parse
 from datetime import datetime, timedelta
+from pathlib import Path
 import re
 from typing import List, Dict, Tuple, Optional
 
@@ -11,6 +12,7 @@ import pandas as pd
 import numpy as np
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 import plotly.graph_objects as go
 import plotly.express as px
 
@@ -21,6 +23,12 @@ import fitbit_client
 # -----------------------------
 EXCLUDE_SHEETS = {"All Data", "Optimal Ranges", "Graphs", "Labs and notes", "NN Metabolic Scorecard"}
 DEFAULT_GROUP_SHEETS = []  # will be filled dynamically
+TIME_PRESETS = ["7 days", "30 days", "90 days", "All time", "Custom"]
+LAST_PLOTLY_ZOOM_EVENT_KEY = "_last_plotly_zoom_event_id"
+PLOTLY_ZOOM_SYNC = components.declare_component(
+    "plotly_zoom_sync",
+    path=str(Path(__file__).parent / "streamlit_components" / "plotly_zoom_sync"),
+)
 
 # -----------------------------
 # Utility functions
@@ -653,9 +661,84 @@ def render_chip_row(chips: List[str]):
         st.markdown(f"<div class='context-chip-row'>{chip_html}</div>", unsafe_allow_html=True)
 
 
+def apply_plotly_zoom_event(event: Optional[Dict], min_date: pd.Timestamp, max_date: pd.Timestamp) -> bool:
+    """Apply a zoom event emitted by the custom Plotly bridge."""
+    if not isinstance(event, dict):
+        return False
+
+    event_id = event.get("eventId")
+    if event_id and st.session_state.get(LAST_PLOTLY_ZOOM_EVENT_KEY) == event_id:
+        return False
+
+    min_date = pd.to_datetime(min_date).normalize()
+    max_date = pd.to_datetime(max_date).normalize()
+    mode = event.get("mode")
+
+    if mode == "all":
+        new_preset = "All time"
+        new_start = min_date
+        new_end = max_date
+    elif mode == "range":
+        start = pd.to_datetime(event.get("start"), errors="coerce")
+        end = pd.to_datetime(event.get("end"), errors="coerce")
+        if pd.isna(start) or pd.isna(end):
+            return False
+        new_start = max(min_date, min(start.normalize(), max_date))
+        new_end = max(min_date, min(end.normalize(), max_date))
+        if new_start > new_end:
+            new_start, new_end = new_end, new_start
+        if new_start == min_date and new_end == max_date:
+            new_preset = "All time"
+        else:
+            new_preset = "Custom"
+    else:
+        return False
+
+    current_preset = st.session_state.get("global_time_preset", "All time")
+    current_start = pd.to_datetime(st.session_state.get("global_time_start", min_date.date())).normalize()
+    current_end = pd.to_datetime(st.session_state.get("global_time_end", max_date.date())).normalize()
+
+    if event_id:
+        st.session_state[LAST_PLOTLY_ZOOM_EVENT_KEY] = event_id
+
+    if current_preset == new_preset and current_start == new_start and current_end == new_end:
+        return False
+
+    st.session_state["global_time_preset"] = new_preset
+    st.session_state["global_time_start"] = new_start.date()
+    st.session_state["global_time_end"] = new_end.date()
+    return True
+
+
+def render_plotly_zoom_sync(scope: str, min_date: pd.Timestamp, max_date: pd.Timestamp) -> None:
+    """Mount the custom Plotly zoom bridge and sync any emitted range into session state."""
+    min_date = pd.to_datetime(min_date).normalize()
+    max_date = pd.to_datetime(max_date).normalize()
+
+    current_start = pd.to_datetime(st.session_state.get("global_time_start", min_date.date())).normalize()
+    current_end = pd.to_datetime(st.session_state.get("global_time_end", max_date.date())).normalize()
+    current_start = max(min_date, min(current_start, max_date))
+    current_end = max(min_date, min(current_end, max_date))
+    if current_start > current_end:
+        current_start, current_end = min_date, max_date
+
+    event = PLOTLY_ZOOM_SYNC(
+        scope=scope,
+        minDate=min_date.date().isoformat(),
+        maxDate=max_date.date().isoformat(),
+        currentPreset=st.session_state.get("global_time_preset", "All time"),
+        currentStart=current_start.date().isoformat(),
+        currentEnd=current_end.date().isoformat(),
+        key=f"plotly_zoom_sync_{scope}",
+        default=None,
+    )
+
+    if apply_plotly_zoom_event(event, min_date, max_date):
+        st.rerun()
+
+
 def render_time_controls(scope: str, min_date: pd.Timestamp, max_date: pd.Timestamp) -> Tuple[pd.Timestamp, pd.Timestamp]:
     """Render shared time controls in the sidebar and return the active range."""
-    presets = ["7 days", "30 days", "90 days", "All time", "Custom"]
     preset_key = "global_time_preset"
     start_key = "global_time_start"
     end_key = "global_time_end"
@@ -663,7 +746,7 @@ def render_time_controls(scope: str, min_date: pd.Timestamp, max_date: pd.Timest
     min_date = pd.to_datetime(min_date).normalize()
     max_date = pd.to_datetime(max_date).normalize()
 
-    if st.session_state.get(preset_key) not in presets:
+    if st.session_state.get(preset_key) not in TIME_PRESETS:
         st.session_state[preset_key] = "All time"
     if start_key not in st.session_state:
         st.session_state[start_key] = min_date.date()
@@ -682,7 +765,7 @@ def render_time_controls(scope: str, min_date: pd.Timestamp, max_date: pd.Timest
 
     st.sidebar.markdown('<hr class="sidebar-divider">', unsafe_allow_html=True)
     st.sidebar.markdown('<div class="section-header" style="border-bottom:none; margin-top:0.5rem; font-size:1.1rem;">Time</div>', unsafe_allow_html=True)
-    preset = st.sidebar.radio("Time window", presets, key=preset_key, label_visibility="collapsed")
+    preset = st.sidebar.radio("Time window", TIME_PRESETS, key=preset_key, label_visibility="collapsed")
 
     if preset == "Custom":
         start_col, end_col = st.sidebar.columns(2)
@@ -815,6 +898,11 @@ def page_blood_panel():
     else:
         selected_tests = sorted(merged["test"].unique().tolist())
 
+    render_plotly_zoom_sync(
+        "blood_panel",
+        merged["Date"].min(),
+        merged["Date"].max(),
+    )
     blood_time_start, blood_time_end = render_time_controls(
         "blood_panel",
         merged["Date"].min(),
@@ -1123,6 +1211,11 @@ def page_fitbit_data():
         if non_empty_dfs:
             fitbit_min_date = min(pd.to_datetime(df["Date"]).min() for df in non_empty_dfs)
             fitbit_max_date = max(pd.to_datetime(df["Date"]).max() for df in non_empty_dfs)
+            render_plotly_zoom_sync(
+                "fitbit",
+                fitbit_min_date,
+                fitbit_max_date,
+            )
             fitbit_time_start, fitbit_time_end = render_time_controls(
                 "fitbit",
                 fitbit_min_date,
