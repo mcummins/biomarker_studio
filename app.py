@@ -640,6 +640,138 @@ def format_display_date(value, fmt: str = "%d %b %Y", empty: str = "No data") ->
     return pd.to_datetime(value).strftime(fmt)
 
 
+def format_fitbit_metric_value(
+    value: float,
+    unit: str = "",
+    decimals: int = 1,
+    *,
+    thousands: bool = False,
+    signed: bool = False,
+) -> str:
+    if pd.isna(value):
+        return "—"
+
+    if decimals == 0:
+        number = f"{value:+,.0f}" if signed else f"{value:,.0f}"
+    else:
+        number = f"{value:+,.{decimals}f}" if signed else f"{value:,.{decimals}f}"
+
+    if not unit:
+        return number
+    if unit == "%":
+        return f"{number}%"
+    return f"{number} {unit}"
+
+
+def compute_fitbit_trend_per_month(df: pd.DataFrame, value_col: str) -> Optional[float]:
+    """Estimate a meaningful linear trend over the visible window."""
+    if df.empty or value_col not in df.columns:
+        return None
+
+    data = df.dropna(subset=[value_col]).sort_values("Date").copy()
+    if len(data) < 7:
+        return None
+
+    data["Date"] = pd.to_datetime(data["Date"])
+    x = (data["Date"] - data["Date"].min()).dt.total_seconds().to_numpy(dtype=float) / 86400.0
+    span_days = float(x.max() - x.min()) if len(x) else 0.0
+    if span_days < 14:
+        return None
+
+    y = data[value_col].astype(float).to_numpy()
+    if np.allclose(y, y[0]):
+        return None
+
+    slope, intercept = np.polyfit(x, y, 1)
+    if not np.isfinite(slope):
+        return None
+
+    y_hat = slope * x + intercept
+    ss_x = float(np.sum((x - x.mean()) ** 2))
+    if ss_x <= 0:
+        return None
+
+    ss_res = float(np.sum((y - y_hat) ** 2))
+    if ss_res <= 1e-12:
+        t_stat = np.inf if abs(slope) > 0 else 0.0
+    else:
+        se_slope = np.sqrt((ss_res / max(len(y) - 2, 1)) / ss_x)
+        t_stat = np.inf if se_slope <= 1e-12 else abs(slope) / se_slope
+
+    fitted_change = abs(slope * span_days)
+    variation = float(np.nanstd(y))
+    if t_stat < 2:
+        return None
+    if variation > 0 and fitted_change < 0.25 * variation:
+        return None
+
+    return float(slope * 30.4375)
+
+
+def render_fitbit_metric_stack(
+    df: pd.DataFrame,
+    value_col: str,
+    average_title: str,
+    trend_title: str,
+    value_formatter,
+    trend_formatter,
+    trend_layout: str = "stacked",
+) -> None:
+    """Render an average card plus an optional visible-window trend card."""
+    def render_metric_card(title: str, value: str, latest_text: Optional[str] = None) -> None:
+        latest_html = f"<div class='fitbit-metric-latest'>{latest_text}</div>" if latest_text else ""
+        st.markdown(
+            f"""
+            <div class="fitbit-metric-card">
+                <div class="fitbit-metric-title">{title}</div>
+                <div class="fitbit-metric-value">{value}</div>
+                {latest_html}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    if df.empty or value_col not in df.columns:
+        render_metric_card(average_title, "—")
+        return
+
+    data = df.dropna(subset=[value_col]).sort_values("Date").copy()
+    if data.empty:
+        render_metric_card(average_title, "—")
+        return
+
+    average_value = data[value_col].mean()
+    latest_value = data.iloc[-1][value_col]
+    trend_per_month = compute_fitbit_trend_per_month(data, value_col)
+
+    if trend_layout == "inline" and trend_per_month is not None:
+        avg_col, trend_col = st.columns(2)
+        with avg_col:
+            render_metric_card(
+                average_title,
+                value_formatter(average_value),
+                f"Latest: {value_formatter(latest_value)}",
+            )
+        with trend_col:
+            render_metric_card(
+                trend_title,
+                trend_formatter(trend_per_month),
+            )
+        return
+
+    render_metric_card(
+        average_title,
+        value_formatter(average_value),
+        f"Latest: {value_formatter(latest_value)}",
+    )
+
+    if trend_per_month is not None:
+        render_metric_card(
+            trend_title,
+            trend_formatter(trend_per_month),
+        )
+
+
 def render_page_hero(title: str, subtitle: str, pills: Optional[List[str]] = None, eyebrow: str = "Biomarker Studio"):
     st.markdown(
         f"""
@@ -1170,7 +1302,6 @@ def page_fitbit_data():
         ("Resting Heart Rate", "fetch_rhr", "rhr"),
         ("Breathing Rate", "fetch_breathing_rate", "breathing_rate"),
         ("Sleep", "fetch_sleep", "sleep"),
-        ("Sleep Scores", "fetch_sleep_score", "sleep_score"),
         ("Activity", "fetch_activity", "activity"),
     ]
 
@@ -1210,7 +1341,6 @@ def page_fitbit_data():
     rhr_df = results["fetch_rhr"]
     br_df = results["fetch_breathing_rate"]
     sleep_df = results["fetch_sleep"]
-    sleep_score_df = results["fetch_sleep_score"]
     activity_df = results["fetch_activity"]
     with content_placeholder.container():
         refresh_notice = st.session_state.pop("fitbit_refresh_notice", None)
@@ -1224,10 +1354,11 @@ def page_fitbit_data():
         for warning in fetch_warnings:
             st.warning(warning)
 
-        # Merge sleep scores into sleep dataframe
-        if not sleep_df.empty and not sleep_score_df.empty:
-            sleep_df = sleep_df.drop(columns=["Score"], errors="ignore")
-            sleep_df = sleep_df.merge(sleep_score_df[["Date", "SleepScore"]], on="Date", how="left")
+        # Fitbit's separate sleep-score endpoint is empty for this account;
+        # use the efficiency field as the sleep score shown in the product UI.
+        if not sleep_df.empty and "Efficiency" in sleep_df.columns:
+            sleep_df = sleep_df.copy()
+            sleep_df["SleepScore"] = sleep_df["Efficiency"]
 
         # Keep full-history copies for chart calculations so rolling averages
         # at the start of the visible window can still use preceding days.
@@ -1291,11 +1422,17 @@ def page_fitbit_data():
         # ==================================================================
         render_section_header("Weight", "", "Body composition")
         if not weight_df.empty:
-            k1, k2 = st.columns([1, 3])
+            k1, k2 = st.columns([1.5, 3])
             with k1:
-                latest_w = weight_df.iloc[-1]
-                st.metric("Latest Weight", f"{latest_w['Weight']:.1f} kg",
-                           delta=f"{weight_df['Weight'].iloc[-1] - weight_df['Weight'].iloc[-2]:.1f} kg" if len(weight_df) >= 2 else None)
+                render_fitbit_metric_stack(
+                    weight_df,
+                    "Weight",
+                    "Average Weight",
+                    "Weight Trend",
+                    lambda v: format_fitbit_metric_value(v, "kg", 1),
+                    lambda v: format_fitbit_metric_value(v, "kg / month", 1, signed=True),
+                    trend_layout="inline",
+                )
             fig_w = plot_fitbit_timeseries(weight_chart_df, "Weight", "Weight", "kg", color="#E07A5F", show_trend=show_trend, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None)
             st.plotly_chart(fig_w, use_container_width=True, config={"displayModeBar": False})
         else:
@@ -1308,30 +1445,32 @@ def page_fitbit_data():
 
         hm1, hm2, hm3 = st.columns(3)
         with hm1:
-            if not hrv_df.empty:
-                latest_hrv = hrv_df.dropna(subset=["RMSSD"])
-                if not latest_hrv.empty:
-                    st.metric("Latest HRV (RMSSD)", f"{latest_hrv.iloc[-1]['RMSSD']:.0f} ms",
-                               delta=f"{latest_hrv['RMSSD'].iloc[-1] - latest_hrv['RMSSD'].iloc[-2]:.0f} ms" if len(latest_hrv) >= 2 else None)
-                else:
-                    st.metric("Latest HRV (RMSSD)", "—")
-            else:
-                st.metric("Latest HRV (RMSSD)", "—")
+            render_fitbit_metric_stack(
+                hrv_df,
+                "RMSSD",
+                "Average HRV (RMSSD)",
+                "HRV Trend",
+                lambda v: format_fitbit_metric_value(v, "ms", 0),
+                lambda v: format_fitbit_metric_value(v, "ms / month", 1, signed=True),
+            )
         with hm2:
-            if not rhr_df.empty:
-                latest_rhr = rhr_df.iloc[-1]
-                st.metric("Latest RHR", f"{latest_rhr['RHR']:.0f} bpm",
-                           delta=f"{rhr_df['RHR'].iloc[-1] - rhr_df['RHR'].iloc[-2]:.0f} bpm" if len(rhr_df) >= 2 else None,
-                           delta_color="inverse")
-            else:
-                st.metric("Latest RHR", "—")
+            render_fitbit_metric_stack(
+                rhr_df,
+                "RHR",
+                "Average RHR",
+                "RHR Trend",
+                lambda v: format_fitbit_metric_value(v, "bpm", 0),
+                lambda v: format_fitbit_metric_value(v, "bpm / month", 1, signed=True),
+            )
         with hm3:
-            if not br_df.empty:
-                latest_br = br_df.iloc[-1]
-                st.metric("Latest Breathing Rate", f"{latest_br['BreathingRate']:.1f} brpm",
-                           delta=f"{br_df['BreathingRate'].iloc[-1] - br_df['BreathingRate'].iloc[-2]:.1f} brpm" if len(br_df) >= 2 else None)
-            else:
-                st.metric("Latest Breathing Rate", "—")
+            render_fitbit_metric_stack(
+                br_df,
+                "BreathingRate",
+                "Average Breathing Rate",
+                "Breathing Trend",
+                lambda v: format_fitbit_metric_value(v, "brpm", 1),
+                lambda v: format_fitbit_metric_value(v, "brpm / month", 2, signed=True),
+            )
 
         st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True)
 
@@ -1358,32 +1497,25 @@ def page_fitbit_data():
         # ==================================================================
         render_section_header("Sleep", "", "Rest")
         if not sleep_df.empty:
-            sl1, sl2, sl3 = st.columns(3)
+            sl1, sl2 = st.columns(2)
             with sl1:
-                latest_sleep = sleep_df.iloc[-1]
-                hrs = latest_sleep.get("DurationHours", 0)
-                st.metric("Latest Sleep Duration", f"{hrs:.1f} hrs",
-                           delta=f"{sleep_df['DurationHours'].iloc[-1] - sleep_df['DurationHours'].iloc[-2]:.1f} hrs" if len(sleep_df) >= 2 else None)
+                render_fitbit_metric_stack(
+                    sleep_df,
+                    "DurationHours",
+                    "Average Sleep Duration",
+                    "Sleep Duration Trend",
+                    lambda v: format_fitbit_metric_value(v, "hrs", 1),
+                    lambda v: format_fitbit_metric_value(v, "hrs / month", 2, signed=True),
+                )
             with sl2:
-                if "SleepScore" in sleep_df.columns and sleep_df["SleepScore"].notna().any():
-                    score_data = sleep_df.dropna(subset=["SleepScore"])
-                    if not score_data.empty:
-                        st.metric("Latest Sleep Score", f"{score_data.iloc[-1]['SleepScore']:.0f}",
-                                   delta=f"{score_data['SleepScore'].iloc[-1] - score_data['SleepScore'].iloc[-2]:.0f}" if len(score_data) >= 2 else None)
-                    else:
-                        st.metric("Latest Sleep Score", "—")
-                else:
-                    st.metric("Latest Sleep Score", "—")
-            with sl3:
-                if not sleep_df["Efficiency"].isna().all():
-                    eff_data = sleep_df.dropna(subset=["Efficiency"])
-                    if not eff_data.empty:
-                        st.metric("Latest Efficiency", f"{eff_data.iloc[-1]['Efficiency']:.0f}%",
-                                   delta=f"{eff_data['Efficiency'].iloc[-1] - eff_data['Efficiency'].iloc[-2]:.0f}%" if len(eff_data) >= 2 else None)
-                    else:
-                        st.metric("Latest Efficiency", "—")
-                else:
-                    st.metric("Latest Efficiency", "—")
+                render_fitbit_metric_stack(
+                    sleep_df,
+                    "SleepScore",
+                    "Average Sleep Score",
+                    "Sleep Score Trend",
+                    lambda v: format_fitbit_metric_value(v, "", 0),
+                    lambda v: format_fitbit_metric_value(v, "points / month", 1, signed=True),
+                )
 
             st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True)
 
@@ -1415,19 +1547,41 @@ def page_fitbit_data():
         if not activity_df.empty:
             a1, a2, a3, a4 = st.columns(4)
             with a1:
-                latest_act = activity_df.iloc[-1]
-                st.metric("Latest Steps", f"{latest_act.get('Steps', 0):,.0f}",
-                           delta=f"{activity_df['Steps'].iloc[-1] - activity_df['Steps'].iloc[-2]:,.0f}" if len(activity_df) >= 2 else None)
+                render_fitbit_metric_stack(
+                    activity_df,
+                    "Steps",
+                    "Average Steps",
+                    "Steps Trend",
+                    lambda v: format_fitbit_metric_value(v, "", 0),
+                    lambda v: format_fitbit_metric_value(v, "steps / month", 0, signed=True),
+                )
             with a2:
-                if "ZoneMinutes" in activity_df.columns:
-                    st.metric("Latest Zone Minutes", f"{latest_act.get('ZoneMinutes', 0):.0f} min",
-                               delta=f"{activity_df['ZoneMinutes'].iloc[-1] - activity_df['ZoneMinutes'].iloc[-2]:.0f} min" if len(activity_df) >= 2 else None)
+                render_fitbit_metric_stack(
+                    activity_df,
+                    "ZoneMinutes",
+                    "Average Zone Minutes",
+                    "Zone Minutes Trend",
+                    lambda v: format_fitbit_metric_value(v, "min", 0),
+                    lambda v: format_fitbit_metric_value(v, "min / month", 1, signed=True),
+                )
             with a3:
-                st.metric("Latest Distance", f"{latest_act.get('Distance', 0):.2f} km",
-                           delta=f"{activity_df['Distance'].iloc[-1] - activity_df['Distance'].iloc[-2]:.2f} km" if len(activity_df) >= 2 else None)
+                render_fitbit_metric_stack(
+                    activity_df,
+                    "Distance",
+                    "Average Distance",
+                    "Distance Trend",
+                    lambda v: format_fitbit_metric_value(v, "km", 2),
+                    lambda v: format_fitbit_metric_value(v, "km / month", 2, signed=True),
+                )
             with a4:
-                st.metric("Latest Calories", f"{latest_act.get('Calories', 0):,.0f}",
-                           delta=f"{activity_df['Calories'].iloc[-1] - activity_df['Calories'].iloc[-2]:,.0f}" if len(activity_df) >= 2 else None)
+                render_fitbit_metric_stack(
+                    activity_df,
+                    "Calories",
+                    "Average Calories",
+                    "Calories Trend",
+                    lambda v: format_fitbit_metric_value(v, "kcal", 0),
+                    lambda v: format_fitbit_metric_value(v, "kcal / month", 0, signed=True),
+                )
 
             st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True)
 
@@ -1820,6 +1974,39 @@ section[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] > label:has(i
     letter-spacing: 0.12em;
     text-transform: uppercase;
     color: var(--muted);
+}
+
+.fitbit-metric-card {
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.9) 0%, rgba(250, 246, 240, 0.92) 100%);
+    border: 1px solid rgba(24, 50, 47, 0.08);
+    border-radius: 18px;
+    box-shadow: 0 10px 28px rgba(21, 38, 35, 0.06);
+    padding: 0.95rem 1rem 0.85rem;
+    min-height: 120px;
+    margin-bottom: 0.7rem;
+}
+
+.fitbit-metric-title {
+    font-size: 0.86rem;
+    font-weight: 700;
+    color: var(--muted);
+    letter-spacing: -0.01em;
+    margin-bottom: 0.45rem;
+}
+
+.fitbit-metric-value {
+    font-size: 1.75rem;
+    line-height: 1.1;
+    font-weight: 800;
+    color: var(--ink);
+    letter-spacing: -0.04em;
+}
+
+.fitbit-metric-latest {
+    margin-top: 0.55rem;
+    font-size: 0.82rem;
+    color: #7a7f8c;
+    line-height: 1.35;
 }
 
 .page-hero {
