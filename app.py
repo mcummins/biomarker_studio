@@ -1250,19 +1250,20 @@ def page_blood_panel():
     selected_tests_title = grp if grp != "(All)" else "All Markers"
     render_section_header(
         selected_tests_title,
-        "Small-multiple trend cards make it easy to compare movement, range position, and momentum at a glance.",
+        "",
         "Visual explorer",
     )
     if tests_selected:
+        graph_tests = [t for t in tests_selected if t != "APOE Genotype"]
         ncols = 3
-        rows = (len(tests_selected) + ncols - 1)//ncols
+        rows = (len(graph_tests) + ncols - 1)//ncols
         for r in range(rows):
             cols = st.columns(ncols)
             for i in range(ncols):
                 idx = r*ncols + i
-                if idx >= len(tests_selected):
+                if idx >= len(graph_tests):
                     continue
-                t = tests_selected[idx]
+                t = graph_tests[idx]
                 with cols[i]:
                     latest_summary = latest_test_summary(data, t)
                     summary_html = f"<div class='chart-card-meta'>Latest: {latest_summary}</div>" if latest_summary else ""
