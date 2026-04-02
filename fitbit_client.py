@@ -711,6 +711,14 @@ def fetch_activity(start_date: Optional[str] = None, force_full: bool = False,
     """
     metric = "activity"
     cached = [] if force_full else _load_cache(metric)
+    zone_fields = {"minutesFatBurn", "minutesCardio", "minutesPeak"}
+    if cached and not force_full:
+        has_zone_data = any(any(field in record for field in zone_fields) for record in cached)
+        if not has_zone_data:
+            # Cache schema upgrade: older activity cache only stored movement
+            # intensity minutes, so refetch to populate heart-rate zones.
+            cached = []
+            force_full = True
     fetch_start = _resolve_fetch_start(metric, cached, start_date, force_full)
     if fetch_start is None:
         return _activity_records_to_df(cached)
@@ -756,6 +764,36 @@ def fetch_activity(start_date: Optional[str] = None, force_full: bool = False,
                     combined[d][field] = 0
             window_start = window_end + timedelta(days=1)
 
+    # Daily heart-rate zones for Active Zone Minutes style reporting.
+    window_start = fetch_start
+    while window_start <= today:
+        if progress_cb:
+            total_days = max((today - fetch_start).days, 1)
+            progress_cb(min(0.875 + ((window_start - fetch_start).days / total_days) * 0.125, 1.0))
+        window_end = min(window_start + timedelta(days=89), today)
+        data = _api_get(
+            f"/1/user/-/activities/heart/date/"
+            f"{window_start.isoformat()}/{window_end.isoformat()}.json"
+        )
+        for entry in data.get("activities-heart", []):
+            d = entry["dateTime"]
+            if d not in combined:
+                combined[d] = {"date": d}
+            heart_value = entry.get("value", {})
+            zone_map = {
+                "Fat Burn": "minutesFatBurn",
+                "Cardio": "minutesCardio",
+                "Peak": "minutesPeak",
+            }
+            for zone in heart_value.get("heartRateZones", []):
+                field = zone_map.get(zone.get("name"))
+                if field:
+                    try:
+                        combined[d][field] = float(zone.get("minutes", 0) or 0)
+                    except (ValueError, TypeError):
+                        combined[d][field] = 0
+        window_start = window_end + timedelta(days=1)
+
     new_records = list(combined.values())
 
     by_date = {r["date"]: r for r in cached}
@@ -772,7 +810,8 @@ def fetch_activity(start_date: Optional[str] = None, force_full: bool = False,
 def _activity_records_to_df(records: List[Dict]) -> pd.DataFrame:
     cols = ["Date", "Steps", "Calories", "Distance",
             "MinutesFairlyActive", "MinutesVeryActive",
-            "MinutesLightlyActive", "MinutesSedentary"]
+            "MinutesLightlyActive", "MinutesSedentary",
+            "MinutesFatBurn", "MinutesCardio", "MinutesPeak"]
     if not records:
         return pd.DataFrame(columns=cols)
     df = pd.DataFrame(records)
@@ -785,10 +824,16 @@ def _activity_records_to_df(records: List[Dict]) -> pd.DataFrame:
         "minutesVeryActive": "MinutesVeryActive",
         "minutesLightlyActive": "MinutesLightlyActive",
         "minutesSedentary": "MinutesSedentary",
+        "minutesFatBurn": "MinutesFatBurn",
+        "minutesCardio": "MinutesCardio",
+        "minutesPeak": "MinutesPeak",
     })
     df = df.drop(columns=["date"], errors="ignore")
-    # Active Zone Minutes = fairly + very active
-    if "MinutesFairlyActive" in df.columns and "MinutesVeryActive" in df.columns:
+    # Active Zone Minutes should come from heart-rate zones when available.
+    if {"MinutesFatBurn", "MinutesCardio", "MinutesPeak"}.issubset(df.columns):
+        zone_components = df[["MinutesFatBurn", "MinutesCardio", "MinutesPeak"]].fillna(0)
+        df["ZoneMinutes"] = zone_components.sum(axis=1)
+    elif "MinutesFairlyActive" in df.columns and "MinutesVeryActive" in df.columns:
         df["ZoneMinutes"] = df["MinutesFairlyActive"] + df["MinutesVeryActive"]
     return df.sort_values("Date").reset_index(drop=True)
 

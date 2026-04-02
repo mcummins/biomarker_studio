@@ -1391,6 +1391,13 @@ def page_fitbit_data():
     br_df = results["fetch_breathing_rate"]
     sleep_df = results["fetch_sleep"]
     activity_df = results["fetch_activity"]
+    if (
+        sync_mode is None
+        and not activity_df.empty
+        and not {"MinutesFatBurn", "MinutesCardio", "MinutesPeak"}.issubset(activity_df.columns)
+    ):
+        sync_mode = "incremental"
+        stale_labels.append("Activity heart-rate zones")
     with content_placeholder.container():
         refresh_notice = st.session_state.pop("fitbit_refresh_notice", None)
         if refresh_notice:
@@ -1685,17 +1692,45 @@ def page_fitbit_data():
             st.plotly_chart(fig_cal, use_container_width=True, config={"displayModeBar": False})
 
             zone_cols = {
-                "MinutesVeryActive": ("#CC0000", "Peak"),
-                "MinutesFairlyActive": ("#E07A5F", "Moderate"),
+                "MinutesFatBurn": ("#F6B26B", "Moderate"),
+                "MinutesCardio": ("#E07A5F", "Vigorous"),
+                "MinutesPeak": ("#CC0000", "Peak"),
             }
             has_zones = any(col in activity_df.columns and activity_df[col].notna().any() for col in zone_cols)
             if has_zones:
-                st.caption("Active Zone Minutes Breakdown")
-                zc1, zc2 = st.columns(2)
+                render_section_header("Zone Minutes", "", "Heart rate zones")
+                z1, z2, z3 = st.columns(3)
+                zone_metric_defs = [
+                    ("MinutesFatBurn", "Average Moderate", "Moderate Trend"),
+                    ("MinutesCardio", "Average Vigorous", "Vigorous Trend"),
+                    ("MinutesPeak", "Average Peak", "Peak Trend"),
+                ]
+                for container, (col, avg_title, trend_title) in zip((z1, z2, z3), zone_metric_defs):
+                    with container:
+                        render_fitbit_metric_stack(
+                            activity_df,
+                            col,
+                            avg_title,
+                            trend_title,
+                            lambda v: format_fitbit_metric_value(v, "min", 0),
+                            lambda v: format_fitbit_metric_value(v, "min / month", 1, signed=True),
+                            lambda v: format_fitbit_metric_value(v, "min / year", 1, signed=True),
+                        )
+
+                zg1, zg2, zg3 = st.columns(3)
                 zone_items = [(col, color, label) for col, (color, label) in zone_cols.items() if col in activity_df.columns and activity_df[col].notna().any()]
-                for i, (col, color, label) in enumerate(zone_items):
-                    with (zc1 if i % 2 == 0 else zc2):
-                        fig_zone = plot_fitbit_timeseries(activity_chart_df, col, label, "min", color=color, show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None)
+                for container, (col, color, label) in zip((zg1, zg2, zg3), zone_items):
+                    with container:
+                        fig_zone = plot_fitbit_timeseries(
+                            activity_chart_df,
+                            col,
+                            label,
+                            "min",
+                            color=color,
+                            show_trend=show_trend,
+                            show_primary_series=show_primary_fitbit_series,
+                            date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None,
+                        )
                         fig_zone.update_layout(height=300)
                         st.plotly_chart(fig_zone, use_container_width=True, config={"displayModeBar": False})
         else:
