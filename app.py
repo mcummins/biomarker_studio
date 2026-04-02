@@ -565,6 +565,7 @@ def make_sparkline(df: pd.DataFrame, test: str) -> go.Figure:
 def plot_fitbit_timeseries(df: pd.DataFrame, y_col: str, title: str,
                            y_label: str, color: str = "#E07A5F",
                            show_trend: bool = True,
+                           show_primary_series: bool = True,
                            date_window: Optional[Tuple[pd.Timestamp, pd.Timestamp]] = None) -> go.Figure:
     """Generic time-series chart for Fitbit metrics."""
     fig = go.Figure()
@@ -583,13 +584,14 @@ def plot_fitbit_timeseries(df: pd.DataFrame, y_col: str, title: str,
         if visible_df.empty:
             return fig
 
-    fig.add_trace(go.Scatter(
-        x=visible_df["Date"], y=visible_df[y_col],
-        mode="lines+markers", name=title,
-        line=dict(color=color, width=2.5),
-        marker=dict(size=5, color=color, line=dict(width=1, color="#FFFFFF")),
-        hovertemplate=f"<b>{title}</b><br>%{{x|%Y-%m-%d}}<br>{y_label}: %{{y:.1f}}<extra></extra>",
-    ))
+    if show_primary_series:
+        fig.add_trace(go.Scatter(
+            x=visible_df["Date"], y=visible_df[y_col],
+            mode="lines+markers", name=title,
+            line=dict(color=color, width=2.5),
+            marker=dict(size=5, color=color, line=dict(width=1, color="#FFFFFF")),
+            hovertemplate=f"<b>{title}</b><br>%{{x|%Y-%m-%d}}<br>{y_label}: %{{y:.1f}}<extra></extra>",
+        ))
 
     # 7-day centered rolling average
     if len(df) >= 7:
@@ -1409,6 +1411,13 @@ def page_fitbit_data():
                 fitbit_min_date,
                 fitbit_max_date,
             )
+            st.sidebar.markdown('<hr class="sidebar-divider">', unsafe_allow_html=True)
+            st.sidebar.markdown('<div class="section-header" style="border-bottom:none; margin-top:0.5rem; font-size:1.1rem;">Display</div>', unsafe_allow_html=True)
+            show_primary_fitbit_series = st.sidebar.checkbox(
+                "Show daily data series",
+                value=True,
+                key="fitbit_show_primary_series",
+            )
             end_inclusive = fitbit_time_end + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
             weight_df = weight_df[(weight_df["Date"] >= fitbit_time_start) & (weight_df["Date"] <= end_inclusive)].copy() if not weight_df.empty else weight_df
             hrv_df = hrv_df[(hrv_df["Date"] >= fitbit_time_start) & (hrv_df["Date"] <= end_inclusive)].copy() if not hrv_df.empty else hrv_df
@@ -1418,6 +1427,7 @@ def page_fitbit_data():
             activity_df = activity_df[(activity_df["Date"] >= fitbit_time_start) & (activity_df["Date"] <= end_inclusive)].copy() if not activity_df.empty else activity_df
         else:
             fitbit_time_start = fitbit_time_end = None
+            show_primary_fitbit_series = True
 
         all_dfs = [weight_df, hrv_df, rhr_df, br_df, sleep_df, activity_df]
         latest_dates = []
@@ -1458,7 +1468,7 @@ def page_fitbit_data():
                     lambda v: format_fitbit_metric_value(v, "kg / year", 1, signed=True),
                     trend_layout="inline",
                 )
-            fig_w = plot_fitbit_timeseries(weight_chart_df, "Weight", "Weight", "kg", color="#E07A5F", show_trend=show_trend, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None)
+            fig_w = plot_fitbit_timeseries(weight_chart_df, "Weight", "Weight", "kg", color="#E07A5F", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None)
             st.plotly_chart(fig_w, use_container_width=True, config={"displayModeBar": False})
         else:
             st.info("No weight data available.")
@@ -1503,19 +1513,19 @@ def page_fitbit_data():
         st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True)
 
         if not hrv_df.empty:
-            fig_hrv = plot_fitbit_timeseries(hrv_chart_df, "RMSSD", "HRV", "ms", color="#81B29A", show_trend=show_trend, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None)
+            fig_hrv = plot_fitbit_timeseries(hrv_chart_df, "RMSSD", "HRV", "ms", color="#81B29A", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None)
             st.plotly_chart(fig_hrv, use_container_width=True, config={"displayModeBar": False})
         else:
             st.info("No HRV data available.")
 
         if not rhr_df.empty:
-            fig_rhr = plot_fitbit_timeseries(rhr_chart_df, "RHR", "Resting HR", "bpm", color="#F2CC8F", show_trend=show_trend, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None)
+            fig_rhr = plot_fitbit_timeseries(rhr_chart_df, "RHR", "Resting HR", "bpm", color="#F2CC8F", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None)
             st.plotly_chart(fig_rhr, use_container_width=True, config={"displayModeBar": False})
         else:
             st.info("No resting heart rate data available.")
 
         if not br_df.empty:
-            fig_br = plot_fitbit_timeseries(br_chart_df, "BreathingRate", "Breathing Rate", "brpm", color="#7EB8DA", show_trend=show_trend, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None)
+            fig_br = plot_fitbit_timeseries(br_chart_df, "BreathingRate", "Breathing Rate", "brpm", color="#7EB8DA", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None)
             st.plotly_chart(fig_br, use_container_width=True, config={"displayModeBar": False})
         else:
             st.info("No breathing rate data available.")
@@ -1549,22 +1559,41 @@ def page_fitbit_data():
 
             st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True)
 
-            fig_dur = plot_fitbit_timeseries(sleep_chart_df, "DurationHours", "Sleep Duration", "hours", color="#8E7CC3", show_trend=show_trend, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None)
+            fig_dur = plot_fitbit_timeseries(sleep_chart_df, "DurationHours", "Sleep Duration", "hours", color="#8E7CC3", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None)
             st.plotly_chart(fig_dur, use_container_width=True, config={"displayModeBar": False})
 
             if "SleepScore" in sleep_df.columns and sleep_df["SleepScore"].notna().any():
-                fig_score = plot_fitbit_timeseries(sleep_chart_df, "SleepScore", "Sleep Score", "score", color="#6AA84F", show_trend=show_trend, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None)
+                fig_score = plot_fitbit_timeseries(sleep_chart_df, "SleepScore", "Sleep Score", "score", color="#6AA84F", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None)
                 st.plotly_chart(fig_score, use_container_width=True, config={"displayModeBar": False})
 
-            stage_cols = {"REM": "#E06666", "Deep": "#3D85C6", "Light": "#F6B26B", "Wake": "#CC0000"}
+            stage_cols = {"Deep": "#3D85C6", "REM": "#E06666", "Light": "#F6B26B", "Wake": "#CC0000"}
             has_stages = any(sleep_df[col].notna().any() for col in stage_cols if col in sleep_df.columns)
             if has_stages:
-                st.caption("Sleep Stages")
+                render_section_header("Sleep Stages", "", "Rest architecture")
+                stage_metric_cols = st.columns(4)
+                stage_metric_defs = [
+                    ("Deep", "Average Deep", "Deep Trend"),
+                    ("REM", "Average REM", "REM Trend"),
+                    ("Light", "Average Light", "Light Trend"),
+                    ("Wake", "Average Wake", "Wake Trend"),
+                ]
+                for container, (col, avg_title, trend_title) in zip(stage_metric_cols, stage_metric_defs):
+                    with container:
+                        render_fitbit_metric_stack(
+                            sleep_df,
+                            col,
+                            avg_title,
+                            trend_title,
+                            lambda v: format_fitbit_metric_value(v, "min", 0),
+                            lambda v: format_fitbit_metric_value(v, "min / month", 1, signed=True),
+                            lambda v: format_fitbit_metric_value(v, "min / year", 1, signed=True),
+                        )
+
                 c1, c2 = st.columns(2)
                 stage_items = [(col, color) for col, color in stage_cols.items() if col in sleep_df.columns and sleep_df[col].notna().any()]
                 for i, (col, color) in enumerate(stage_items):
                     with (c1 if i % 2 == 0 else c2):
-                        fig_stage = plot_fitbit_timeseries(sleep_chart_df, col, col, "min", color=color, show_trend=show_trend, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None)
+                        fig_stage = plot_fitbit_timeseries(sleep_chart_df, col, col, "min", color=color, show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None)
                         fig_stage.update_layout(height=300)
                         st.plotly_chart(fig_stage, use_container_width=True, config={"displayModeBar": False})
         else:
@@ -1619,17 +1648,17 @@ def page_fitbit_data():
 
             st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True)
 
-            fig_steps = plot_fitbit_timeseries(activity_chart_df, "Steps", "Steps", "steps", color="#E07A5F", show_trend=show_trend, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None)
+            fig_steps = plot_fitbit_timeseries(activity_chart_df, "Steps", "Steps", "steps", color="#E07A5F", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None)
             st.plotly_chart(fig_steps, use_container_width=True, config={"displayModeBar": False})
 
             if "ZoneMinutes" in activity_df.columns:
-                fig_zm = plot_fitbit_timeseries(activity_chart_df, "ZoneMinutes", "Active Zone Minutes", "min", color="#81B29A", show_trend=show_trend, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None)
+                fig_zm = plot_fitbit_timeseries(activity_chart_df, "ZoneMinutes", "Active Zone Minutes", "min", color="#81B29A", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None)
                 st.plotly_chart(fig_zm, use_container_width=True, config={"displayModeBar": False})
 
-            fig_dist = plot_fitbit_timeseries(activity_chart_df, "Distance", "Distance", "km", color="#7EB8DA", show_trend=show_trend, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None)
+            fig_dist = plot_fitbit_timeseries(activity_chart_df, "Distance", "Distance", "km", color="#7EB8DA", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None)
             st.plotly_chart(fig_dist, use_container_width=True, config={"displayModeBar": False})
 
-            fig_cal = plot_fitbit_timeseries(activity_chart_df, "Calories", "Calories", "kcal", color="#F2CC8F", show_trend=show_trend, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None)
+            fig_cal = plot_fitbit_timeseries(activity_chart_df, "Calories", "Calories", "kcal", color="#F2CC8F", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None)
             st.plotly_chart(fig_cal, use_container_width=True, config={"displayModeBar": False})
 
             zone_cols = {
@@ -1643,7 +1672,7 @@ def page_fitbit_data():
                 zone_items = [(col, color, label) for col, (color, label) in zone_cols.items() if col in activity_df.columns and activity_df[col].notna().any()]
                 for i, (col, color, label) in enumerate(zone_items):
                     with (zc1 if i % 2 == 0 else zc2):
-                        fig_zone = plot_fitbit_timeseries(activity_chart_df, col, label, "min", color=color, show_trend=show_trend, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None)
+                        fig_zone = plot_fitbit_timeseries(activity_chart_df, col, label, "min", color=color, show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None)
                         fig_zone.update_layout(height=300)
                         st.plotly_chart(fig_zone, use_container_width=True, config={"displayModeBar": False})
         else:
