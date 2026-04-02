@@ -427,7 +427,11 @@ def plot_single_test(df: pd.DataFrame, test: str,
         y_max += 0.05 * span
         fig.update_yaxes(range=[y_min, y_max])
 
-        x0, x1 = x.min(), x.max()
+        if date_window is not None:
+            x0 = pd.to_datetime(date_window[0])
+            x1 = pd.to_datetime(date_window[1])
+        else:
+            x0, x1 = x.min(), x.max()
 
         def rect(y0, y1, color_hex):
             # draw behind series
