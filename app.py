@@ -30,8 +30,8 @@ LAST_PLOTLY_ZOOM_EVENT_KEY = "_last_plotly_zoom_event_id"
 LIFT_SERIES_COLOR = "#7EB8DA"
 STRENGTH_STANDARDS_GENDER = "Male"
 STRENGTH_STANDARD_BAND_COLORS = {
-    "Noob": "rgba(255, 239, 224, 0.22)",
-    "Beginner": "rgba(255, 204, 128, 0.24)",
+    "Noob": "rgba(253, 249, 240, 0.24)",
+    "Beginner": "rgba(241, 229, 196, 0.30)",
     "Intermediate": "rgba(210, 237, 191, 0.20)",
     "Advanced": "rgba(126, 200, 171, 0.24)",
     "Elite": "rgba(150, 206, 255, 0.20)",
@@ -916,7 +916,10 @@ def get_latest_fitbit_weight_kg() -> Optional[float]:
     return float(weight_data.iloc[-1]["Weight"])
 
 
-def format_strength_gap_to_next(classification: Optional[Dict[str, object]]) -> Optional[str]:
+def format_strength_gap_to_next(
+    classification: Optional[Dict[str, object]],
+    trend_per_month: Optional[float] = None,
+) -> Optional[str]:
     if not classification:
         return None
 
@@ -928,7 +931,22 @@ def format_strength_gap_to_next(classification: Optional[Dict[str, object]]) -> 
     kg_value = float(kg_to_next)
     if kg_value <= 0:
         return f"At {next_category} threshold"
-    return f"{format_fitbit_metric_value(kg_value, 'kg', 1)} to {next_category}"
+
+    subtitle = f"{format_fitbit_metric_value(kg_value, 'kg', 1)} to {next_category}"
+    if trend_per_month is None or trend_per_month <= 0:
+        return subtitle
+
+    months_to_next = kg_value / float(trend_per_month)
+    if not np.isfinite(months_to_next) or months_to_next <= 0:
+        return subtitle
+
+    if months_to_next < 1:
+        estimate_text = "<1 month"
+    elif months_to_next < 9.5:
+        estimate_text = f"~{months_to_next:.1f} months"
+    else:
+        estimate_text = f"~{months_to_next:.0f} months"
+    return f"{subtitle} • {estimate_text} at current pace"
 
 
 def compute_lift_standard_axis_range(
@@ -945,7 +963,7 @@ def compute_lift_standard_axis_range(
         data_max = float(numeric_values.max())
 
     category = classification.get("category") if classification else None
-    next_category = classification.get("next_category") if classification else None
+    current_band_upper = classification.get("upper_bound") if classification else None
     levels = list(strength_standards.STANDARD_LEVELS)
 
     if category in levels:
@@ -957,15 +975,19 @@ def compute_lift_standard_axis_range(
     else:
         lower_focus = float(thresholds["Noob"]) * 0.9
 
-    if next_category in levels:
-        upper_focus = float(thresholds[next_category])
-    elif category == "Elite":
-        upper_focus = max(float(thresholds["Elite"]), data_max)
-    else:
-        upper_focus = float(thresholds["Advanced"])
-
     y_min = max(0.0, min(data_min * 0.95, lower_focus * 0.97))
-    y_max = max(data_max * 1.06, upper_focus * 1.08)
+
+    if current_band_upper is not None:
+        desired_y_max = float(current_band_upper) / 0.96
+        y_max = max(data_max * 1.04, desired_y_max)
+    elif category == "Elite+":
+        y_max = data_max * 1.08
+    elif category == "Elite":
+        elite_cutoff = float(thresholds["Elite"])
+        y_max = max(data_max * 1.06, elite_cutoff * 1.04)
+    else:
+        y_max = data_max * 1.08
+
     if y_max <= y_min:
         y_max = y_min + max(10.0, y_min * 0.2)
     return y_min, y_max
@@ -2360,7 +2382,7 @@ def page_lifts():
         )
         if strength_classification:
             category_value = str(strength_classification["category"])
-            category_subtitle = format_strength_gap_to_next(strength_classification)
+            category_subtitle = format_strength_gap_to_next(strength_classification, trend_per_month)
         elif current_bodyweight_kg is None:
             category_value = "—"
             category_subtitle = "Needs Fitbit weight data"
