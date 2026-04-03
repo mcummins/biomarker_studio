@@ -12,9 +12,13 @@ sheet_api_key.json
 
 # Fitbit cached data
 .fitbit_cache/
+.hevy_cache/
 
 # IDE / editor
 .claude/
+
+# Local API keys
+hevy_api_key.txt
 
 # Misc
 =2.31

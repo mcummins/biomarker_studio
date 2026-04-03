@@ -17,6 +17,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 
 import fitbit_client
+import hevy_client
 
 # -----------------------------
 # Config
@@ -25,6 +26,7 @@ EXCLUDE_SHEETS = {"All Data", "Optimal Ranges", "Graphs", "Labs and notes", "NN 
 DEFAULT_GROUP_SHEETS = []  # will be filled dynamically
 TIME_PRESETS = ["30 days", "90 days", "1 year", "All time", "Custom"]
 LAST_PLOTLY_ZOOM_EVENT_KEY = "_last_plotly_zoom_event_id"
+LIFT_COLOR_PALETTE = ["#E07A5F", "#81B29A", "#7EB8DA", "#F2CC8F", "#8E7CC3", "#6AA84F"]
 PLOTLY_ZOOM_SYNC = components.declare_component(
     "plotly_zoom_sync",
     path=str(Path(__file__).parent / "streamlit_components" / "plotly_zoom_sync"),
@@ -650,6 +652,121 @@ def plot_fitbit_timeseries(df: pd.DataFrame, y_col: str, title: str,
     return fig
 
 
+def plot_lift_timeseries(
+    df: pd.DataFrame,
+    title: str,
+    color: str = "#E07A5F",
+    date_window: Optional[Tuple[pd.Timestamp, pd.Timestamp]] = None,
+) -> go.Figure:
+    """Plot session-best estimated 1RM over time for a single lift."""
+    fig = go.Figure()
+    if df.empty:
+        return fig
+
+    ordered = df.sort_values("workout_start_time").copy()
+    if ordered.empty:
+        return fig
+
+    visible_df = ordered
+    if date_window is not None:
+        window_start = pd.to_datetime(date_window[0])
+        window_end = pd.to_datetime(date_window[1]) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+        visible_df = ordered[
+            (ordered["workout_start_time"] >= window_start) &
+            (ordered["workout_start_time"] <= window_end)
+        ].copy()
+        if visible_df.empty:
+            return fig
+
+    hover_custom = np.stack(
+        [
+            visible_df["best_weight_kg"].astype(float).to_numpy(),
+            visible_df["best_reps"].astype(float).to_numpy(),
+            visible_df["working_set_count"].astype(float).to_numpy(),
+        ],
+        axis=-1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=visible_df["workout_start_time"],
+            y=visible_df["estimated_1rm_kg"],
+            customdata=hover_custom,
+            mode="lines+markers",
+            name="Session best",
+            line=dict(color=color, width=2.5),
+            marker=dict(size=6, color=color, line=dict(width=1, color="#FFFFFF")),
+            hovertemplate=(
+                f"<b>{title}</b><br>%{{x|%Y-%m-%d}}"
+                "<br>Estimated 1RM: %{y:.1f} kg"
+                "<br>Best set: %{customdata[0]:.1f} kg × %{customdata[1]:.0f}"
+                "<br>Working sets: %{customdata[2]:.0f}<extra></extra>"
+            ),
+        )
+    )
+
+    if len(ordered) >= 4:
+        rolling = (
+            ordered.set_index("workout_start_time")["estimated_1rm_kg"]
+            .rolling("28D", min_periods=2)
+            .mean()
+            .reset_index()
+        )
+        if date_window is not None:
+            rolling = rolling[
+                (rolling["workout_start_time"] >= window_start) &
+                (rolling["workout_start_time"] <= window_end)
+            ].copy()
+        if not rolling.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=rolling["workout_start_time"],
+                    y=rolling["estimated_1rm_kg"],
+                    mode="lines",
+                    name="28-day avg",
+                    line=dict(color="#81B29A", width=2, dash="dash"),
+                    hovertemplate="<b>28-day avg</b><br>%{x|%Y-%m-%d}<br>Estimated 1RM: %{y:.1f} kg<extra></extra>",
+                )
+            )
+
+    if len(visible_df) >= 6:
+        days = (
+            visible_df["workout_start_time"] - visible_df["workout_start_time"].min()
+        ).dt.total_seconds().to_numpy(dtype=float) / 86400.0
+        y_vals = visible_df["estimated_1rm_kg"].astype(float).to_numpy()
+        slope, intercept = np.polyfit(days, y_vals, 1)
+        x_line = pd.date_range(
+            start=visible_df["workout_start_time"].min(),
+            end=visible_df["workout_start_time"].max(),
+            periods=50,
+        )
+        x_days = (
+            x_line - visible_df["workout_start_time"].min()
+        ).total_seconds() / 86400.0
+        y_line = slope * x_days + intercept
+        fig.add_trace(
+            go.Scatter(
+                x=x_line,
+                y=y_line,
+                mode="lines",
+                name="Trend",
+                line=dict(dash="dot", color="#D4C5B5", width=1.5),
+                hoverinfo="skip",
+            )
+        )
+
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=40, b=40),
+        height=380,
+        xaxis_title="Date",
+        yaxis_title="Estimated 1RM (kg)",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    if date_window is not None:
+        fig.update_xaxes(range=[pd.to_datetime(date_window[0]), pd.to_datetime(date_window[1])])
+    apply_warm_theme(fig)
+    return fig
+
+
 def format_display_date(value, fmt: str = "%d %b %Y", empty: str = "No data") -> str:
     if pd.isna(value):
         return empty
@@ -732,6 +849,25 @@ def compute_fitbit_trend_per_month(df: pd.DataFrame, value_col: str) -> Optional
     return float(slope * 30.4375)
 
 
+def render_metric_card(
+    title: str,
+    value: str,
+    latest_text: Optional[str] = None,
+    variant: str = "primary",
+) -> None:
+    latest_html = f"<div class='fitbit-metric-latest'>{latest_text}</div>" if latest_text else ""
+    st.markdown(
+        f"""
+        <div class="fitbit-metric-card fitbit-metric-card--{variant}">
+            <div class="fitbit-metric-title">{title}</div>
+            <div class="fitbit-metric-value">{value}</div>
+            {latest_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def render_fitbit_metric_stack(
     df: pd.DataFrame,
     value_col: str,
@@ -743,24 +879,6 @@ def render_fitbit_metric_stack(
     trend_layout: str = "stacked",
 ) -> None:
     """Render an average card plus an optional visible-window trend card."""
-    def render_metric_card(
-        title: str,
-        value: str,
-        latest_text: Optional[str] = None,
-        variant: str = "primary",
-    ) -> None:
-        latest_html = f"<div class='fitbit-metric-latest'>{latest_text}</div>" if latest_text else ""
-        st.markdown(
-            f"""
-            <div class="fitbit-metric-card fitbit-metric-card--{variant}">
-                <div class="fitbit-metric-title">{title}</div>
-                <div class="fitbit-metric-value">{value}</div>
-                {latest_html}
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
     if df.empty or value_col not in df.columns:
         render_metric_card(average_title, "—")
         return
@@ -1971,6 +2089,99 @@ def page_fitbit_data():
             loading_placeholder.empty()
 
 
+def page_lifts():
+    """Hevy strength dashboard focused on session-best estimated 1RM."""
+    render_page_hero(
+        "Lifts",
+        "Your most frequently trained weighted exercises, translated into simple one-rep-max trend lines from Hevy.",
+        pills=["Top six lifts", "Estimated 1RM", "Hevy sync"],
+        eyebrow="Strength training",
+    )
+
+    if not hevy_client.has_api_key():
+        st.warning("Hevy is not configured yet. Add `hevy_api_key.txt` to the project root.")
+        st.stop()
+
+    sync_mode = st.session_state.pop("hevy_sync_mode", None)
+    force_refresh = sync_mode == "refresh"
+
+    try:
+        with st.spinner("Loading Hevy workouts..."):
+            workouts, hevy_meta = hevy_client.get_workouts(force_refresh=force_refresh)
+    except Exception as e:
+        st.error(f"Failed to load Hevy workouts: {e}")
+        st.stop()
+
+    history_df = hevy_client.build_working_set_history(workouts)
+    session_best_df = hevy_client.summarize_session_best(history_df)
+    top_exercises_df = hevy_client.summarize_top_exercises(session_best_df, top_n=6)
+
+    if session_best_df.empty or top_exercises_df.empty:
+        st.info("No weighted Hevy sets with both load and reps were found yet.")
+        st.stop()
+
+    min_date = session_best_df["workout_date"].min()
+    max_date = session_best_df["workout_date"].max()
+    lifts_time_start, lifts_time_end = render_time_controls("lifts", min_date, max_date)
+    end_inclusive = lifts_time_end + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+    filtered_sessions = session_best_df[
+        (session_best_df["workout_start_time"] >= lifts_time_start) &
+        (session_best_df["workout_start_time"] <= end_inclusive)
+    ].copy()
+
+    if force_refresh and hevy_meta.get("source") == "live":
+        st.success("Hevy data refreshed.")
+    if hevy_meta.get("warning"):
+        st.warning(hevy_meta["warning"])
+
+    fetched_at = hevy_meta.get("fetched_at")
+    if fetched_at is not None:
+        source_label = "Live sync" if hevy_meta.get("source") == "live" else "Cached sync"
+        st.caption(f"{source_label}: {format_display_date(fetched_at, fmt='%d %b %Y %H:%M')}")
+
+    stats_in_view = filtered_sessions if not filtered_sessions.empty else session_best_df
+    s1, s2 = st.columns(2)
+    with s1:
+        render_metric_card("Workouts", f"{len(workouts):,}")
+    with s2:
+        render_metric_card("Latest workout", format_display_date(stats_in_view["workout_start_time"].max()))
+
+    if filtered_sessions.empty:
+        st.info("No lift sessions fall inside the selected time window.")
+        st.stop()
+
+    for index, exercise in top_exercises_df.reset_index(drop=True).iterrows():
+        exercise_sessions = filtered_sessions[
+            filtered_sessions["exercise_key"] == exercise["exercise_key"]
+        ].sort_values("workout_start_time")
+
+        render_section_header(
+            exercise["exercise_title"],
+            "",
+            "Strength trend",
+        )
+
+        best_1rm = exercise_sessions["estimated_1rm_kg"].max() if not exercise_sessions.empty else np.nan
+        if exercise_sessions.empty:
+            st.caption("No logged sessions for this lift in the selected time window.")
+            continue
+
+        metric_col, _buffer_col = st.columns([1.25, 3])
+        with metric_col:
+            render_metric_card(
+                "One Rep Max",
+                format_fitbit_metric_value(best_1rm, "kg", 1) if pd.notna(best_1rm) else "—",
+            )
+        st.markdown("<div style='margin-bottom: 0.35rem;'></div>", unsafe_allow_html=True)
+        fig = plot_lift_timeseries(
+            exercise_sessions,
+            exercise["exercise_title"],
+            color=LIFT_COLOR_PALETTE[index % len(LIFT_COLOR_PALETTE)],
+            date_window=(lifts_time_start, lifts_time_end),
+        )
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+
 def page_settings():
     """Settings page for data sources and Fitbit configuration."""
     render_page_hero(
@@ -1996,6 +2207,26 @@ def page_settings():
     if st.button("Force refresh Google Sheets"):
         load_from_gsheets.clear()
         st.success("Google Sheets cache cleared. The next Blood Panel visit will fetch fresh data.")
+
+    render_section_header("Hevy", "Connection health and maintenance controls for the Lifts page.", "Sources")
+    hevy_key_path = hevy_client.get_api_key_path()
+    hevy_cache_updated = hevy_client.cache_last_updated()
+    if hevy_key_path:
+        st.success("Hevy API key detected.")
+        st.caption(f"Using local key: `{hevy_key_path}`")
+    else:
+        st.info("No local Hevy API key detected yet. Add `hevy_api_key.txt` to enable the Lifts page.")
+    if hevy_cache_updated is not None:
+        st.caption(f"Cached Hevy workouts last updated: {format_display_date(hevy_cache_updated, fmt='%Y-%m-%d %H:%M')}")
+    hevy_col1, hevy_col2 = st.columns(2)
+    with hevy_col1:
+        if st.button("Sync latest Hevy data"):
+            st.session_state["hevy_sync_mode"] = "refresh"
+            st.success("The next Lifts visit will refresh your Hevy data.")
+    with hevy_col2:
+        if st.button("Clear Hevy cache"):
+            hevy_client.clear_cache()
+            st.success("Hevy cache cleared.")
 
     # Status
     render_section_header("Connection Status", "A quick health check of your local Fitbit connection and token state.", "Setup")
@@ -2629,7 +2860,7 @@ with st.sidebar:
 
     page = st.radio(
         "Navigation",
-        ["Blood Panel", "Fitbit Data", "Settings"],
+        ["Blood Panel", "Lifts", "Fitbit Data", "Settings"],
         label_visibility="collapsed",
         key="page_nav",
     )
@@ -2671,6 +2902,8 @@ with page_root.container():
         page_blood_panel()
     elif page == "Fitbit Data":
         page_fitbit_data()
+    elif page == "Lifts":
+        page_lifts()
     elif page == "Settings":
         page_settings()
 
