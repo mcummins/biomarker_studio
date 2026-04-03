@@ -11,7 +11,7 @@ LOG_FILE="$LOG_DIR/streamlit.log"
 PID_FILE="$LOG_DIR/streamlit.pid"
 ARCH_BIN="/usr/bin/arch"
 VERSION_FILE="$LOG_DIR/launcher-version"
-LAUNCHER_VERSION="2"
+LAUNCHER_VERSION="5"
 
 mkdir -p "$LOG_DIR"
 
@@ -46,6 +46,10 @@ server_responding() {
     /usr/bin/curl --silent --head --max-time 2 "$URL" >/dev/null 2>&1
 }
 
+open_app_url() {
+    /usr/bin/open "$URL" >/dev/null 2>&1 || /usr/bin/osascript -e "open location \"$URL\"" >/dev/null 2>&1
+}
+
 if [[ ! -x "$PYTHON_BIN" ]]; then
     /usr/bin/osascript -e 'display alert "Biomarker Studio" message "Could not find .venv/bin/python3. Recreate the virtual environment or update the launcher." as critical'
     exit 1
@@ -76,15 +80,13 @@ if [[ -f "$PID_FILE" ]]; then
 fi
 
 if [[ -f "$PID_FILE" ]]; then
-    if server_responding; then
-        /usr/bin/open "$URL"
-    fi
+    open_app_url
     exit 0
 fi
 
 (
     cd "$APP_DIR"
-    nohup "$ARCH_BIN" -arm64 "$PYTHON_BIN" -m streamlit run "$APP_FILE" >>"$LOG_FILE" 2>&1 &
+    nohup "$ARCH_BIN" -arm64 "$PYTHON_BIN" -m streamlit run "$APP_FILE" --server.address 127.0.0.1 >>"$LOG_FILE" 2>&1 &
     echo $! >"$PID_FILE"
     echo "$LAUNCHER_VERSION" >"$VERSION_FILE"
 ) >/dev/null 2>&1
@@ -100,11 +102,11 @@ fi
 
 for _ in $(/usr/bin/seq 1 30); do
     if server_responding; then
-        /usr/bin/open "$URL"
+        open_app_url
         exit 0
     fi
     /bin/sleep 1
 done
 
-/usr/bin/open "$URL"
+open_app_url
 exit 0
