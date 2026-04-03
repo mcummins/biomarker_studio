@@ -18,6 +18,7 @@ import plotly.express as px
 
 import fitbit_client
 import hevy_client
+import strength_standards
 
 # -----------------------------
 # Config
@@ -26,12 +27,21 @@ EXCLUDE_SHEETS = {"All Data", "Optimal Ranges", "Graphs", "Labs and notes", "NN 
 DEFAULT_GROUP_SHEETS = []  # will be filled dynamically
 TIME_PRESETS = ["30 days", "90 days", "1 year", "All time", "Custom"]
 LAST_PLOTLY_ZOOM_EVENT_KEY = "_last_plotly_zoom_event_id"
-LIFT_COLOR_PALETTE = ["#E07A5F", "#81B29A", "#7EB8DA", "#F2CC8F", "#8E7CC3", "#6AA84F"]
+LIFT_SERIES_COLOR = "#7EB8DA"
+STRENGTH_STANDARDS_GENDER = "Male"
+STRENGTH_STANDARD_BAND_COLORS = {
+    "Noob": "rgba(255, 239, 224, 0.22)",
+    "Beginner": "rgba(255, 204, 128, 0.24)",
+    "Intermediate": "rgba(210, 237, 191, 0.20)",
+    "Advanced": "rgba(126, 200, 171, 0.24)",
+    "Elite": "rgba(150, 206, 255, 0.20)",
+    "Elite+": "rgba(169, 145, 255, 0.24)",
+}
 LIFTS_PAGE_CONFIG = [
     {"label": "Bench", "source_titles": ["Bench Press (Barbell)"]},
     {"label": "Squat", "source_titles": ["Squat (Barbell)", "Zercher Squat"]},
     {"label": "Deadlift", "source_titles": ["Deadlift (Barbell)", "Deadlift (Trap Bar)"]},
-    {"label": "Barbell Overhead Press", "source_titles": ["Overhead Press (Barbell)"]},
+    {"label": "Overhead Press", "source_titles": ["Overhead Press (Barbell)"]},
     {"label": "Bicep Curl", "source_titles": ["Bicep Curl (Dumbbell)", "Bicep Curl (Barbell)"]},
 ]
 PLOTLY_ZOOM_SYNC = components.declare_component(
@@ -664,6 +674,8 @@ def plot_lift_timeseries(
     title: str,
     color: str = "#E07A5F",
     date_window: Optional[Tuple[pd.Timestamp, pd.Timestamp]] = None,
+    standards_thresholds: Optional[Dict[str, float]] = None,
+    strength_classification: Optional[Dict[str, object]] = None,
 ) -> go.Figure:
     """Plot session-best estimated 1RM over time for a single lift."""
     fig = go.Figure()
@@ -684,6 +696,15 @@ def plot_lift_timeseries(
         ].copy()
         if visible_df.empty:
             return fig
+
+    y_axis_range = None
+    if standards_thresholds:
+        y_axis_range = compute_lift_standard_axis_range(
+            visible_df["estimated_1rm_kg"],
+            standards_thresholds,
+            strength_classification,
+        )
+        add_lift_standard_bands(fig, standards_thresholds, y_axis_range)
 
     hover_custom = np.stack(
         [
@@ -746,6 +767,8 @@ def plot_lift_timeseries(
     )
     if date_window is not None:
         fig.update_xaxes(range=[pd.to_datetime(date_window[0]), pd.to_datetime(date_window[1])])
+    if y_axis_range is not None:
+        fig.update_yaxes(range=list(y_axis_range))
     apply_warm_theme(fig)
     return fig
 
@@ -875,6 +898,99 @@ def compute_lift_trend_per_month(df: pd.DataFrame, value_col: str) -> Optional[f
         return None
 
     return float(slope * 30.4375)
+
+
+def get_latest_fitbit_weight_kg() -> Optional[float]:
+    try:
+        weight_df = fitbit_client.load_cached_dataframe("weight")
+    except Exception:
+        return None
+
+    if weight_df.empty or "Weight" not in weight_df.columns:
+        return None
+
+    weight_data = weight_df.dropna(subset=["Date", "Weight"]).sort_values("Date")
+    if weight_data.empty:
+        return None
+
+    return float(weight_data.iloc[-1]["Weight"])
+
+
+def format_strength_gap_to_next(classification: Optional[Dict[str, object]]) -> Optional[str]:
+    if not classification:
+        return None
+
+    next_category = classification.get("next_category")
+    kg_to_next = classification.get("kg_to_next")
+    if next_category is None or kg_to_next is None:
+        return "Elite standard achieved"
+
+    kg_value = float(kg_to_next)
+    if kg_value <= 0:
+        return f"At {next_category} threshold"
+    return f"{format_fitbit_metric_value(kg_value, 'kg', 1)} to {next_category}"
+
+
+def compute_lift_standard_axis_range(
+    values: pd.Series,
+    thresholds: Dict[str, float],
+    classification: Optional[Dict[str, object]],
+) -> Tuple[float, float]:
+    numeric_values = pd.to_numeric(values, errors="coerce").dropna()
+    if numeric_values.empty:
+        data_min = float(thresholds["Noob"])
+        data_max = float(thresholds["Intermediate"])
+    else:
+        data_min = float(numeric_values.min())
+        data_max = float(numeric_values.max())
+
+    category = classification.get("category") if classification else None
+    next_category = classification.get("next_category") if classification else None
+    levels = list(strength_standards.STANDARD_LEVELS)
+
+    if category in levels:
+        category_index = levels.index(category)
+        if category_index == 0:
+            lower_focus = float(thresholds["Noob"]) * 0.75
+        else:
+            lower_focus = float(thresholds[levels[category_index - 1]])
+    else:
+        lower_focus = float(thresholds["Noob"]) * 0.9
+
+    if next_category in levels:
+        upper_focus = float(thresholds[next_category])
+    elif category == "Elite":
+        upper_focus = max(float(thresholds["Elite"]), data_max)
+    else:
+        upper_focus = float(thresholds["Advanced"])
+
+    y_min = max(0.0, min(data_min * 0.95, lower_focus * 0.97))
+    y_max = max(data_max * 1.06, upper_focus * 1.08)
+    if y_max <= y_min:
+        y_max = y_min + max(10.0, y_min * 0.2)
+    return y_min, y_max
+
+
+def add_lift_standard_bands(
+    fig: go.Figure,
+    thresholds: Dict[str, float],
+    y_axis_range: Tuple[float, float],
+) -> None:
+    y_min, y_max = y_axis_range
+    for band in strength_standards.get_category_bands(thresholds):
+        lower_bound = float(band["lower_bound"] or 0.0)
+        upper_bound = y_max if band["upper_bound"] is None else float(band["upper_bound"])
+        clipped_lower = max(y_min, lower_bound)
+        clipped_upper = min(y_max, upper_bound)
+        if clipped_upper <= clipped_lower:
+            continue
+        fig.add_hrect(
+            y0=clipped_lower,
+            y1=clipped_upper,
+            fillcolor=STRENGTH_STANDARD_BAND_COLORS[str(band["category"])],
+            line_width=0,
+            layer="below",
+        )
 
 
 def render_metric_card(
@@ -2121,8 +2237,8 @@ def page_lifts():
     """Hevy strength dashboard focused on session-best estimated 1RM."""
     render_page_hero(
         "Lifts",
-        "Your most frequently trained weighted exercises, translated into simple one-rep-max trend lines from Hevy.",
-        pills=["Top six lifts", "Estimated 1RM", "Hevy sync"],
+        "Your key lifts from Hevy, translated into simple one-rep-max trend lines and strength-standard categories.",
+        pills=["Five key lifts", "Estimated 1RM", "Strength standards"],
         eyebrow="Strength training",
     )
 
@@ -2174,6 +2290,13 @@ def page_lifts():
         source_label = "Live sync" if hevy_meta.get("source") == "live" else "Cached sync"
         st.caption(f"{source_label}: {format_display_date(fetched_at, fmt='%d %b %Y %H:%M')}")
 
+    current_bodyweight_kg = get_latest_fitbit_weight_kg()
+    if strength_standards.has_data() and current_bodyweight_kg is not None:
+        st.caption(
+            f"Strength standards use your latest cached Fitbit weight "
+            f"({format_fitbit_metric_value(current_bodyweight_kg, 'kg', 1)}) and male thresholds."
+        )
+
     stats_in_view = filtered_sessions if not filtered_sessions.empty else selected_sessions_df
     s1, s2 = st.columns(2)
     with s1:
@@ -2209,6 +2332,14 @@ def page_lifts():
             st.caption("No logged sessions for this lift in the selected time window.")
             continue
 
+        standards_thresholds = None
+        if current_bodyweight_kg is not None:
+            standards_thresholds = strength_standards.get_thresholds(
+                source_titles,
+                current_bodyweight_kg,
+                gender=STRENGTH_STANDARDS_GENDER,
+            )
+
         recent_cutoff = exercise_all_sessions["workout_start_time"].max() - pd.Timedelta(days=90)
         recent_trend_df = exercise_all_sessions[
             exercise_all_sessions["workout_start_time"] >= recent_cutoff
@@ -2222,26 +2353,46 @@ def page_lifts():
             else "—"
         )
 
-        metric_col, _buffer_col = st.columns([1.25, 3])
-        with metric_col:
-            one_rep_col, trend_col = st.columns(2)
-            with one_rep_col:
-                render_metric_card(
-                    "One Rep Max",
-                    format_fitbit_metric_value(best_1rm, "kg", 1) if pd.notna(best_1rm) else "—",
-                )
-            with trend_col:
-                render_metric_card(
-                    "Trend (90 days)",
-                    trend_display,
-                    variant="trend",
-                )
+        strength_classification = (
+            strength_standards.classify_1rm(best_1rm, standards_thresholds)
+            if standards_thresholds is not None and pd.notna(best_1rm)
+            else None
+        )
+        if strength_classification:
+            category_value = str(strength_classification["category"])
+            category_subtitle = format_strength_gap_to_next(strength_classification)
+        elif current_bodyweight_kg is None:
+            category_value = "—"
+            category_subtitle = "Needs Fitbit weight data"
+        else:
+            category_value = "—"
+            category_subtitle = "No standards available"
+
+        one_rep_col, trend_col, category_col = st.columns(3)
+        with one_rep_col:
+            render_metric_card(
+                "One Rep Max",
+                format_fitbit_metric_value(best_1rm, "kg", 1) if pd.notna(best_1rm) else "—",
+            )
+        with trend_col:
+            render_metric_card(
+                "Trend (90 days)",
+                trend_display,
+            )
+        with category_col:
+            render_metric_card(
+                "Current Category",
+                category_value,
+                latest_text=category_subtitle,
+            )
         st.markdown("<div style='margin-bottom: 0.35rem;'></div>", unsafe_allow_html=True)
         fig = plot_lift_timeseries(
             exercise_sessions,
             exercise_title,
-            color=LIFT_COLOR_PALETTE[index % len(LIFT_COLOR_PALETTE)],
+            color=LIFT_SERIES_COLOR,
             date_window=(lifts_time_start, lifts_time_end),
+            standards_thresholds=standards_thresholds,
+            strength_classification=strength_classification,
         )
         st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
