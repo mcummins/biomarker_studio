@@ -27,6 +27,13 @@ DEFAULT_GROUP_SHEETS = []  # will be filled dynamically
 TIME_PRESETS = ["30 days", "90 days", "1 year", "All time", "Custom"]
 LAST_PLOTLY_ZOOM_EVENT_KEY = "_last_plotly_zoom_event_id"
 LIFT_COLOR_PALETTE = ["#E07A5F", "#81B29A", "#7EB8DA", "#F2CC8F", "#8E7CC3", "#6AA84F"]
+LIFTS_PAGE_CONFIG = [
+    {"label": "Bench", "source_titles": ["Bench Press (Barbell)"]},
+    {"label": "Squat", "source_titles": ["Squat (Barbell)", "Zercher Squat"]},
+    {"label": "Deadlift", "source_titles": ["Deadlift (Barbell)", "Deadlift (Trap Bar)"]},
+    {"label": "Barbell Overhead Press", "source_titles": ["Overhead Press (Barbell)"]},
+    {"label": "Bicep Curl", "source_titles": ["Bicep Curl (Dumbbell)", "Bicep Curl (Barbell)"]},
+]
 PLOTLY_ZOOM_SYNC = components.declare_component(
     "plotly_zoom_sync",
     path=str(Path(__file__).parent / "streamlit_components" / "plotly_zoom_sync"),
@@ -704,30 +711,6 @@ def plot_lift_timeseries(
         )
     )
 
-    if len(ordered) >= 4:
-        rolling = (
-            ordered.set_index("workout_start_time")["estimated_1rm_kg"]
-            .rolling("28D", min_periods=2)
-            .mean()
-            .reset_index()
-        )
-        if date_window is not None:
-            rolling = rolling[
-                (rolling["workout_start_time"] >= window_start) &
-                (rolling["workout_start_time"] <= window_end)
-            ].copy()
-        if not rolling.empty:
-            fig.add_trace(
-                go.Scatter(
-                    x=rolling["workout_start_time"],
-                    y=rolling["estimated_1rm_kg"],
-                    mode="lines",
-                    name="28-day avg",
-                    line=dict(color="#81B29A", width=2, dash="dash"),
-                    hovertemplate="<b>28-day avg</b><br>%{x|%Y-%m-%d}<br>Estimated 1RM: %{y:.1f} kg<extra></extra>",
-                )
-            )
-
     if len(visible_df) >= 6:
         days = (
             visible_df["workout_start_time"] - visible_df["workout_start_time"].min()
@@ -844,6 +827,51 @@ def compute_fitbit_trend_per_month(df: pd.DataFrame, value_col: str) -> Optional
     if t_stat < 2:
         return None
     if variation > 0 and fitted_change < 0.25 * variation:
+        return None
+
+    return float(slope * 30.4375)
+
+
+def compute_lift_trend_per_month(df: pd.DataFrame, value_col: str) -> Optional[float]:
+    """Compute a monthly trend for lift data, trimming obvious negative deload outliers."""
+    if df.empty or value_col not in df.columns:
+        return None
+
+    data = df.dropna(subset=[value_col]).sort_values("Date").copy()
+    if len(data) < 3:
+        return None
+
+    data["Date"] = pd.to_datetime(data["Date"])
+    x = (data["Date"] - data["Date"].min()).dt.total_seconds().to_numpy(dtype=float) / 86400.0
+    span_days = float(x.max() - x.min()) if len(x) else 0.0
+    if span_days < 21:
+        return None
+
+    y = data[value_col].astype(float).to_numpy()
+    if np.allclose(y, y[0]):
+        return 0.0
+
+    filtered = data.copy()
+    if len(filtered) >= 5:
+        median = float(filtered[value_col].median())
+        mad = float(np.median(np.abs(filtered[value_col].to_numpy(dtype=float) - median)))
+        if mad > 0:
+            lower_bound = median - (2.5 * 1.4826 * mad)
+            trimmed = filtered[filtered[value_col] >= lower_bound].copy()
+            if len(trimmed) >= 3:
+                filtered = trimmed
+
+    x = (filtered["Date"] - filtered["Date"].min()).dt.total_seconds().to_numpy(dtype=float) / 86400.0
+    span_days = float(x.max() - x.min()) if len(x) else 0.0
+    if span_days < 21:
+        return None
+
+    y = filtered[value_col].astype(float).to_numpy()
+    if np.allclose(y, y[0]):
+        return 0.0
+
+    slope, _intercept = np.polyfit(x, y, 1)
+    if not np.isfinite(slope):
         return None
 
     return float(slope * 30.4375)
@@ -2114,19 +2142,26 @@ def page_lifts():
 
     history_df = hevy_client.build_working_set_history(workouts)
     session_best_df = hevy_client.summarize_session_best(history_df)
-    top_exercises_df = hevy_client.summarize_top_exercises(session_best_df, top_n=6)
+    selected_source_titles = [
+        title
+        for item in LIFTS_PAGE_CONFIG
+        for title in item["source_titles"]
+    ]
+    selected_sessions_df = session_best_df[
+        session_best_df["exercise_title"].isin(selected_source_titles)
+    ].copy()
 
-    if session_best_df.empty or top_exercises_df.empty:
+    if selected_sessions_df.empty:
         st.info("No weighted Hevy sets with both load and reps were found yet.")
         st.stop()
 
-    min_date = session_best_df["workout_date"].min()
-    max_date = session_best_df["workout_date"].max()
+    min_date = selected_sessions_df["workout_date"].min()
+    max_date = selected_sessions_df["workout_date"].max()
     lifts_time_start, lifts_time_end = render_time_controls("lifts", min_date, max_date)
     end_inclusive = lifts_time_end + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
-    filtered_sessions = session_best_df[
-        (session_best_df["workout_start_time"] >= lifts_time_start) &
-        (session_best_df["workout_start_time"] <= end_inclusive)
+    filtered_sessions = selected_sessions_df[
+        (selected_sessions_df["workout_start_time"] >= lifts_time_start) &
+        (selected_sessions_df["workout_start_time"] <= end_inclusive)
     ].copy()
 
     if force_refresh and hevy_meta.get("source") == "live":
@@ -2139,7 +2174,7 @@ def page_lifts():
         source_label = "Live sync" if hevy_meta.get("source") == "live" else "Cached sync"
         st.caption(f"{source_label}: {format_display_date(fetched_at, fmt='%d %b %Y %H:%M')}")
 
-    stats_in_view = filtered_sessions if not filtered_sessions.empty else session_best_df
+    stats_in_view = filtered_sessions if not filtered_sessions.empty else selected_sessions_df
     s1, s2 = st.columns(2)
     with s1:
         render_metric_card("Workouts", f"{len(workouts):,}")
@@ -2150,32 +2185,61 @@ def page_lifts():
         st.info("No lift sessions fall inside the selected time window.")
         st.stop()
 
-    for index, exercise in top_exercises_df.reset_index(drop=True).iterrows():
+    for index, exercise_config in enumerate(LIFTS_PAGE_CONFIG):
+        exercise_title = exercise_config["label"]
+        source_titles = exercise_config["source_titles"]
         exercise_sessions = filtered_sessions[
-            filtered_sessions["exercise_key"] == exercise["exercise_key"]
+            filtered_sessions["exercise_title"].isin(source_titles)
+        ].sort_values("workout_start_time")
+        exercise_all_sessions = selected_sessions_df[
+            selected_sessions_df["exercise_title"].isin(source_titles)
         ].sort_values("workout_start_time")
 
         render_section_header(
-            exercise["exercise_title"],
+            exercise_title,
             "",
             "Strength trend",
         )
 
         best_1rm = exercise_sessions["estimated_1rm_kg"].max() if not exercise_sessions.empty else np.nan
+        if exercise_all_sessions.empty:
+            st.caption("No logged data found for this lift yet.")
+            continue
         if exercise_sessions.empty:
             st.caption("No logged sessions for this lift in the selected time window.")
             continue
 
+        recent_cutoff = exercise_all_sessions["workout_start_time"].max() - pd.Timedelta(days=90)
+        recent_trend_df = exercise_all_sessions[
+            exercise_all_sessions["workout_start_time"] >= recent_cutoff
+        ][["workout_start_time", "estimated_1rm_kg"]].rename(
+            columns={"workout_start_time": "Date", "estimated_1rm_kg": "Value"}
+        )
+        trend_per_month = compute_lift_trend_per_month(recent_trend_df, "Value")
+        trend_display = (
+            format_fitbit_metric_value(trend_per_month, "kg / month", 1, signed=True)
+            if trend_per_month is not None
+            else "—"
+        )
+
         metric_col, _buffer_col = st.columns([1.25, 3])
         with metric_col:
-            render_metric_card(
-                "One Rep Max",
-                format_fitbit_metric_value(best_1rm, "kg", 1) if pd.notna(best_1rm) else "—",
-            )
+            one_rep_col, trend_col = st.columns(2)
+            with one_rep_col:
+                render_metric_card(
+                    "One Rep Max",
+                    format_fitbit_metric_value(best_1rm, "kg", 1) if pd.notna(best_1rm) else "—",
+                )
+            with trend_col:
+                render_metric_card(
+                    "Trend (90 days)",
+                    trend_display,
+                    variant="trend",
+                )
         st.markdown("<div style='margin-bottom: 0.35rem;'></div>", unsafe_allow_html=True)
         fig = plot_lift_timeseries(
             exercise_sessions,
-            exercise["exercise_title"],
+            exercise_title,
             color=LIFT_COLOR_PALETTE[index % len(LIFT_COLOR_PALETTE)],
             date_window=(lifts_time_start, lifts_time_end),
         )
