@@ -2564,7 +2564,11 @@ def page_settings():
 # MAIN APP — page config, global CSS, sidebar nav
 # =====================================================================
 
-st.set_page_config(page_title="Biomarker Studio", layout="wide")
+st.set_page_config(
+    page_title="Biomarker Studio",
+    page_icon=str(Path(__file__).with_name("app_icon.png")),
+    layout="wide",
+)
 
 # ---- Global CSS ----
 st.markdown("""
