@@ -1,0 +1,10 @@
+#!/bin/bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+RESOURCE_DIR="${SCRIPT_DIR%/MacOS}/Resources"
+
+/bin/bash "$RESOURCE_DIR/launch.sh" >/dev/null 2>&1 &
+
+exit 0
