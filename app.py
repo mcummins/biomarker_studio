@@ -145,6 +145,10 @@ def normalize_all_data(df: pd.DataFrame) -> pd.DataFrame:
     long["Raw"] = parsed.apply(lambda x: x[2])
     long = long.dropna(subset=["Value"])
     long = long.rename(columns={"Test":"test","Unit":"unit"})
+    if "test" in long.columns:
+        long["test"] = long["test"].astype(str).str.strip()
+    if "unit" in long.columns:
+        long["unit"] = long["unit"].astype(str).str.strip().replace("", np.nan)
     return long
 
 def normalize_ranges(df: pd.DataFrame) -> pd.DataFrame:
@@ -164,6 +168,10 @@ def normalize_ranges(df: pd.DataFrame) -> pd.DataFrame:
         "Optimal Range (upper)":"upper",
         "Optimal Range (borderline)":"borderline"
     })
+    if "test" in df2.columns:
+        df2["test"] = df2["test"].astype(str).str.strip()
+    if "unit" in df2.columns:
+        df2["unit"] = df2["unit"].astype(str).str.strip().replace("", np.nan)
     return df2
 
 def attach_ranges(long: pd.DataFrame, ranges: pd.DataFrame, policy: str = "union") -> pd.DataFrame:
@@ -404,6 +412,7 @@ def apply_warm_theme(fig: go.Figure) -> go.Figure:
     fig.update_layout(
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
+        showlegend=False,
         font=dict(family="Manrope, sans-serif", color="#18322f"),
         hoverlabel=dict(
             bgcolor="#18322f",
@@ -661,7 +670,6 @@ def plot_fitbit_timeseries(df: pd.DataFrame, y_col: str, title: str,
         height=400,
         xaxis_title="Date",
         yaxis_title=y_label,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
     if date_window is not None:
         fig.update_xaxes(range=[pd.to_datetime(date_window[0]), pd.to_datetime(date_window[1])])
@@ -763,7 +771,6 @@ def plot_lift_timeseries(
         height=380,
         xaxis_title="Date",
         yaxis_title="Estimated 1RM (kg)",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
     if date_window is not None:
         fig.update_xaxes(range=[pd.to_datetime(date_window[0]), pd.to_datetime(date_window[1])])
