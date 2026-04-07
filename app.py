@@ -3101,7 +3101,7 @@ with st.sidebar:
 
     page = st.radio(
         "Navigation",
-        ["Blood Panel", "Lifts", "Fitbit Data", "Settings"],
+        ["Lifts", "Fitbit Data", "Blood Panel", "Settings"],
         label_visibility="collapsed",
         key="page_nav",
     )
