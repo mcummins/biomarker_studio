@@ -1973,7 +1973,31 @@ def render_time_controls(scope: str, min_date: pd.Timestamp, max_date: pd.Timest
 
     st.sidebar.markdown('<hr class="sidebar-divider">', unsafe_allow_html=True)
     st.sidebar.markdown('<div class="section-header" style="border-bottom:none; margin-top:0.5rem; font-size:1.1rem;">Time</div>', unsafe_allow_html=True)
-    preset = st.sidebar.radio("Time window", TIME_PRESETS, key=preset_key, label_visibility="collapsed")
+
+    # Label every slider stop ourselves (Streamlit only labels the ends) and
+    # highlight the active one; the floating thumb value and built-in end
+    # labels are hidden via CSS.
+    short_labels = {"30 days": "30d", "90 days": "90d", "1 year": "1y", "All time": "All", "Custom": "Custom"}
+    active_preset = st.session_state[preset_key]
+    stops = []
+    last_index = len(TIME_PRESETS) - 1
+    for i, p in enumerate(TIME_PRESETS):
+        if i == 0:
+            pos = "left:0;"
+        elif i == last_index:
+            pos = "right:0;"
+        else:
+            pos = f"left:{i / last_index * 100:.0f}%; transform:translateX(-50%);"
+        cls = "time-stop active" if p == active_preset else "time-stop"
+        stops.append(f'<span class="{cls}" style="{pos}">{short_labels.get(p, p)}</span>')
+    st.sidebar.markdown(f'<div class="time-stop-row">{"".join(stops)}</div>', unsafe_allow_html=True)
+
+    preset = st.sidebar.select_slider(
+        "Time window",
+        options=TIME_PRESETS,
+        key=preset_key,
+        label_visibility="collapsed",
+    )
 
     if preset == "Custom":
         start_col, end_col = st.sidebar.columns(2)
@@ -3823,8 +3847,45 @@ section[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] > label:has(i
     border-radius: 16px !important;
 }
 
-.stSlider [data-baseweb="slider"] > div > div {
+.stSlider [data-baseweb="slider"] > div:first-child > div {
     background: var(--accent) !important;
+}
+
+section[data-testid="stSidebar"] .stSlider {
+    padding: 0 0.35rem;
+}
+
+section[data-testid="stSidebar"] .stSlider [data-testid="stThumbValue"],
+section[data-testid="stSidebar"] .stSlider [data-testid="stTickBar"] {
+    display: none !important;
+}
+
+.time-stop-row {
+    position: relative;
+    height: 1rem;
+    margin: 0.1rem 0.35rem -0.9rem;
+    font-size: 0.72rem;
+}
+
+.time-stop-row .time-stop {
+    position: absolute;
+    top: 0;
+    color: var(--muted);
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+}
+
+.time-stop-row .time-stop.active {
+    color: var(--accent);
+    font-weight: 700;
+}
+
+section[data-testid="stSidebar"] .stSlider [role="slider"] {
+    background: #FFFFFF !important;
+    border: 1px solid rgba(24, 50, 47, 0.22) !important;
+    box-shadow: 0 2px 6px rgba(24, 50, 47, 0.22) !important;
+    width: 16px !important;
+    height: 16px !important;
 }
 
 div[data-testid="stDataFrame"],
