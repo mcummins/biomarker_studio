@@ -2,6 +2,7 @@
 import os
 import io
 import json
+import html
 import urllib.parse
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -23,7 +24,7 @@ import strength_standards
 # -----------------------------
 # Config
 # -----------------------------
-EXCLUDE_SHEETS = {"All Data", "Optimal Ranges", "Graphs", "Labs and notes", "NN Metabolic Scorecard"}
+EXCLUDE_SHEETS = {"All Data", "Optimal Ranges", "Graphs", "Labs and notes", "NN Metabolic Scorecard", "Dexa"}
 DEFAULT_GROUP_SHEETS = []  # will be filled dynamically
 TIME_PRESETS = ["30 days", "90 days", "1 year", "All time", "Custom"]
 LAST_PLOTLY_ZOOM_EVENT_KEY = "_last_plotly_zoom_event_id"
@@ -150,6 +151,165 @@ def normalize_all_data(df: pd.DataFrame) -> pd.DataFrame:
     if "unit" in long.columns:
         long["unit"] = long["unit"].astype(str).str.strip().replace("", np.nan)
     return long
+
+
+def _empty_dexa_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=[
+            "row_order", "category", "region", "metric", "test", "unit", "Date",
+            "Value", "Qualifier", "Raw", "lower", "upper", "borderline",
+        ]
+    )
+
+
+def _is_probable_date(value) -> bool:
+    if pd.isna(value):
+        return False
+    try:
+        return pd.notna(pd.to_datetime(value, errors="coerce"))
+    except Exception:
+        return False
+
+
+def format_dexa_test_name(region: str, metric: str) -> str:
+    region = str(region or "").strip()
+    metric = str(metric or "").strip()
+    if not region or region.lower() == "whole body":
+        return metric
+    return f"{region} - {metric}"
+
+
+def get_dexa_health_bounds(metric: str, region: str, unit: str = "") -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """Return lower, upper, borderline bounds for commonly recognized DEXA cutoffs."""
+    metric_key = str(metric or "").strip().lower()
+    region_key = str(region or "").strip().lower()
+    unit_key = str(unit or "").strip().lower()
+
+    if metric_key == "tissue %fat" and region_key == "whole body":
+        # Adult male body-fat categories commonly put 25%+ in the obese range.
+        return 6.0, 25.0, 24.0
+    if metric_key == "vat area" and unit_key in {"cm^2", "cm²"}:
+        # DEXA VAT area: <100 cm^2 is commonly used as lower cardiometabolic risk.
+        return None, 160.0, 100.0
+    if metric_key == "relative skeletal muscle index":
+        # Common low-muscle-mass cutoff for men is roughly 7.0 kg/m^2.
+        return 7.0, None, None
+    if metric_key == "t-score":
+        # WHO bone-density interpretation: normal >= -1, osteoporosis <= -2.5.
+        return -2.5, None, -1.0
+    if metric_key == "z-score":
+        # Z-score below -2.0 is commonly described as below expected range for age.
+        return -2.0, None, None
+    if metric_key == "android/gynoid ratio":
+        # A/G ratio above 1.0 is a common central-adiposity risk signal in men.
+        return None, 1.0, None
+    return None, None, None
+
+
+def dexa_health_status(value, lower, upper, borderline=None) -> str:
+    if pd.isna(value):
+        return "neutral"
+    has_lower = pd.notna(lower)
+    has_upper = pd.notna(upper)
+    has_borderline = pd.notna(borderline)
+    if not has_lower and not has_upper:
+        return "neutral"
+    if has_lower and value < lower:
+        return "alert"
+    if has_upper and value > upper:
+        return "alert"
+    if has_borderline:
+        if has_upper and borderline < upper and value > borderline:
+            return "caution"
+        if has_lower and borderline > lower and value < borderline:
+            return "caution"
+    return "good"
+
+
+def normalize_dexa_data(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize the Dexa sheet, whose scan dates live in the Metadata/Date row."""
+    if df is None or df.empty:
+        return _empty_dexa_frame()
+
+    raw = df.copy()
+    headers = [str(col).strip() for col in raw.columns]
+    lower_headers = [h.lower() for h in headers]
+
+    def header_index(name: str) -> Optional[int]:
+        try:
+            return lower_headers.index(name.lower())
+        except ValueError:
+            return None
+
+    category_idx = header_index("Category")
+    region_idx = header_index("Region")
+    metric_idx = header_index("Metric")
+    unit_idx = header_index("Unit")
+    if None in (category_idx, region_idx, metric_idx, unit_idx):
+        return _empty_dexa_frame()
+
+    change_indices = [i for i, h in enumerate(lower_headers) if h.startswith("change")]
+    first_change_idx = min(change_indices) if change_indices else len(headers)
+    measurement_indices = list(range(unit_idx + 1, first_change_idx))
+
+    date_row = None
+    metric_values = raw.iloc[:, metric_idx].astype(str).str.strip().str.lower()
+    date_matches = raw[metric_values == "date"]
+    if not date_matches.empty:
+        date_row = date_matches.iloc[0]
+
+    dated_columns = []
+    for idx in measurement_indices:
+        date_raw = date_row.iloc[idx] if date_row is not None and idx < len(date_row) else headers[idx]
+        if not _is_probable_date(date_raw):
+            continue
+        dated_columns.append((idx, pd.to_datetime(date_raw, errors="coerce")))
+
+    rows = []
+    for row_order, row in raw.iterrows():
+        category = str(row.iloc[category_idx] if category_idx < len(row) else "").strip()
+        region = str(row.iloc[region_idx] if region_idx < len(row) else "").strip()
+        metric = str(row.iloc[metric_idx] if metric_idx < len(row) else "").strip()
+        unit = str(row.iloc[unit_idx] if unit_idx < len(row) else "").strip()
+        if not category or not metric or metric.lower() == "date":
+            continue
+        if category.lower() == "metadata":
+            continue
+
+        test = format_dexa_test_name(region, metric)
+        lower, upper, borderline = get_dexa_health_bounds(metric, region, unit)
+        for idx, scan_date in dated_columns:
+            parsed_value, qualifier, raw_value = parse_value(row.iloc[idx] if idx < len(row) else np.nan)
+            if parsed_value is None or pd.isna(scan_date):
+                continue
+            rows.append(
+                {
+                    "row_order": int(row_order),
+                    "category": category,
+                    "region": region,
+                    "metric": metric,
+                    "test": test,
+                    "unit": unit,
+                    "Date": pd.to_datetime(scan_date),
+                    "Value": parsed_value,
+                    "Qualifier": qualifier,
+                    "Raw": raw_value,
+                    "lower": lower,
+                    "upper": upper,
+                    "borderline": borderline,
+                }
+            )
+
+    if not rows:
+        return _empty_dexa_frame()
+
+    long = pd.DataFrame(rows)
+    long["status"] = long.apply(
+        lambda r: dexa_health_status(r["Value"], r.get("lower"), r.get("upper"), r.get("borderline")),
+        axis=1,
+    )
+    return long
+
 
 def normalize_ranges(df: pd.DataFrame) -> pd.DataFrame:
     df2 = df.copy()
@@ -820,6 +980,155 @@ def format_fitbit_metric_value(
     return f"{number} {unit}"
 
 
+def format_dexa_metric_value(value, unit: str = "") -> str:
+    if pd.isna(value):
+        return "—"
+    unit = str(unit or "").strip()
+    value = float(value)
+    abs_value = abs(value)
+    if unit in {"%", "percentage points"}:
+        number = f"{value:.1f}"
+    elif unit in {"g", "cal/day"}:
+        number = f"{value:,.0f}"
+    elif unit in {"kg", "years", "cm", "cm^2", "cm²", "cm^3", "cm³"}:
+        number = f"{value:,.1f}" if abs_value < 100 else f"{value:,.0f}"
+    elif unit in {"ratio", "score", "kg/m^2", "kg/m²", "g/cm^2", "g/cm²"}:
+        number = f"{value:.2f}" if abs_value < 10 else f"{value:.1f}"
+    else:
+        number = format_lab_number(value)
+
+    if not unit:
+        return number
+    if unit == "%":
+        return f"{number}%"
+    return f"{number} {unit}"
+
+
+def format_dexa_change(value, unit: str = "") -> str:
+    if pd.isna(value):
+        return ""
+    return format_dexa_metric_value(value, unit)
+
+
+def get_dexa_latest_rows(df: pd.DataFrame, category: Optional[str] = None) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame()
+    data = df.copy()
+    if category is not None:
+        data = data[data["category"] == category].copy()
+    if data.empty:
+        return data
+    data = data.sort_values(["test", "Date"])
+    data["PrevValue"] = data.groupby("test")["Value"].shift(1)
+    data["DeltaAbs"] = data["Value"] - data["PrevValue"]
+    latest_idx = data.groupby("test")["Date"].idxmax()
+    sort_columns = ["row_order"] if "row_order" in data.columns else ["category", "region", "metric"]
+    return data.loc[latest_idx].sort_values(sort_columns).reset_index(drop=True)
+
+
+def latest_dexa_metric_summary(df: pd.DataFrame, test: str) -> str:
+    data = df[df["test"] == test].sort_values("Date")
+    if data.empty:
+        return ""
+    latest = data.iloc[-1]
+    return format_dexa_metric_value(latest["Value"], latest.get("unit", ""))
+
+
+def get_dexa_summary_section(row: pd.Series) -> str:
+    metric = str(row.get("metric", "")).strip()
+    region = str(row.get("region", "")).strip()
+    metric_key = metric.lower()
+    region_key = region.lower()
+
+    if metric in {"Dexa total mass", "Fat mass", "Lean mass"}:
+        return "Mass metrics"
+    if metric in {"Tissue %Fat", "Tissue %Lean"}:
+        return "Body composition"
+    if metric_key.startswith("vat "):
+        return "VAT metrics"
+    if metric == "Bone mineral content" or "bone density" in region_key:
+        return "Bone density metrics"
+    if metric in {"Left lean mass", "Right lean mass", "Right-left lean mass difference"}:
+        return "Symmetry metrics"
+    return "Other"
+
+
+def render_dexa_summary_card_grid(cards: List[Dict[str, str]]) -> None:
+    for start in range(0, len(cards), 4):
+        cols = st.columns(4)
+        for col, card in zip(cols, cards[start:start + 4]):
+            title_html = (
+                f"<div class='dexa-summary-label'>{html.escape(card['title'])}</div>"
+                if card.get("title") else ""
+            )
+            footnote_html = (
+                f"<div class='dexa-summary-footnote'>{html.escape(card['footnote'])}</div>"
+                if card.get("footnote") else ""
+            )
+            with col:
+                card_html = (
+                    f'<div class="dexa-summary-card dexa-summary-card--{html.escape(card["status"])}">'
+                    f'{title_html}'
+                    f'<div class="dexa-summary-value">{html.escape(card["value"])}</div>'
+                    f'{footnote_html}'
+                    '</div>'
+                )
+                st.markdown(card_html, unsafe_allow_html=True)
+
+
+def render_dexa_summary_subsection(title: str, cards: List[Dict[str, str]]) -> None:
+    if not cards:
+        return
+    st.markdown(f"<div class='dexa-summary-subsection'>{html.escape(title)}</div>", unsafe_allow_html=True)
+    render_dexa_summary_card_grid(cards)
+
+
+def render_dexa_summary_cards(summary_rows: pd.DataFrame, latest_date: pd.Timestamp) -> None:
+    render_dexa_summary_card_grid(
+        [
+            {
+                "title": "Latest sample",
+                "value": format_display_date(latest_date),
+                "footnote": "Dexa scan date",
+                "status": "neutral",
+            }
+        ]
+    )
+
+    grouped_cards = {
+        "Mass metrics": [],
+        "Body composition": [],
+        "VAT metrics": [],
+        "Bone density metrics": [],
+        "Symmetry metrics": [],
+        "Other": [],
+    }
+    for _, row in summary_rows.iterrows():
+        delta_text = ""
+        if pd.notna(row.get("DeltaAbs")):
+            delta_text = f"Change: {format_dexa_change(row.get('DeltaAbs'), row.get('unit'))}"
+        if pd.to_datetime(row.get("Date")) != pd.to_datetime(latest_date):
+            measured = format_display_date(row.get("Date"))
+            delta_text = f"Last measured: {measured}" if not delta_text else f"{delta_text} • {measured}"
+        section = get_dexa_summary_section(row)
+        grouped_cards[section].append(
+            {
+                "title": str(row.get("test", "")),
+                "value": format_dexa_metric_value(row.get("Value"), row.get("unit")),
+                "footnote": delta_text,
+                "status": dexa_health_status(
+                    row.get("Value"),
+                    row.get("lower"),
+                    row.get("upper"),
+                    row.get("borderline"),
+                ),
+            }
+        )
+
+    for section, cards in grouped_cards.items():
+        render_dexa_summary_subsection(section, cards)
+
+
 def formatted_fitbit_value_is_zero(display_value: str) -> bool:
     match = re.match(r"^[+-]?([0-9,]+(?:\.[0-9]+)?)", display_value.strip())
     if not match:
@@ -1365,7 +1674,7 @@ def inject_sidebar_scroll_restorer(page_key: str) -> None:
         let lastSidebarNode = scroller;
         let lastPageKey = getActivePageKey();
 
-        const observer = new MutationObserver(() => {
+        const watchSidebar = () => {
           const nextScroller = findSidebarScroller();
           const nextPageKey = getActivePageKey();
           if (!nextScroller) return;
@@ -1381,11 +1690,9 @@ def inject_sidebar_scroll_restorer(page_key: str) -> None:
           } else {
             restore(nextScroller);
           }
-        });
+        };
 
-        try {
-          observer.observe(window.parent.document.body, { childList: true, subtree: true });
-        } catch (error) {}
+        window.setInterval(watchSidebar, 350);
         </script>
         """
     components.html(
@@ -1789,6 +2096,172 @@ def page_blood_panel():
         st.caption("Export current filtered dataset (CSV)")
         csv = data.sort_values(["test","Date"]).to_csv(index=False).encode("utf-8")
         st.download_button("Download CSV", data=csv, file_name="blood_panel_data.csv", mime="text/csv")
+
+
+def page_dexa():
+    """DEXA body-composition explorer backed by the Dexa Google Sheet tab."""
+    hero_placeholder = st.empty()
+
+    with st.sidebar:
+        local_key_path = os.path.join(os.path.dirname(__file__), "sheet_api_key.json")
+        sheets = None
+        if os.path.exists(local_key_path):
+            try:
+                with open(local_key_path, "r") as f:
+                    service_account_info = json.load(f)
+
+                default_sheet_url = "https://docs.google.com/spreadsheets/d/1pfYaK6t25gcKdBAUu8_geyGlQP6wp6px9IyNUKI4wdw/edit?usp=sharing"
+                spreadsheet_id = parse_spreadsheet_id(default_sheet_url)
+                sheets = load_from_gsheets(spreadsheet_id, service_account_info)
+            except Exception as e:
+                st.error(f"Auto-load of {local_key_path} failed: {e}")
+
+        if sheets is None:
+            source = st.radio("Choose source", ["Google Sheets (recommended)", "Upload Excel (offline)"], index=0, key="dexa_source")
+            if source.startswith("Google"):
+                url_or_id = st.text_input(
+                    "Google Sheet URL or ID",
+                    value="https://docs.google.com/spreadsheets/d/1pfYaK6t25gcKdBAUu8_geyGlQP6wp6px9IyNUKI4wdw/edit?usp=sharing",
+                    key="dexa_sheet_url",
+                )
+                spreadsheet_id = parse_spreadsheet_id(url_or_id)
+                st.write("Provide Google service account JSON (the sheet must be shared with the service account email).")
+                sa_file = st.file_uploader("Service Account JSON", type=["json"], key="dexa_service_account_json")
+                refresh = st.button("Refresh", key="dexa_refresh")
+                if sa_file is not None:
+                    try:
+                        service_account_info = json.load(sa_file)
+                        if refresh:
+                            st.cache_data.clear()
+                        sheets = load_from_gsheets(spreadsheet_id, service_account_info)
+                    except Exception as e:
+                        st.error(f"Failed to load from Google Sheets: {e}")
+            else:
+                up = st.file_uploader("Upload your Excel export (.xlsx)", type=["xlsx"], key="dexa_xlsx")
+                if up is not None:
+                    sheets = load_from_xlsx(up)
+
+    if sheets is None:
+        st.info("Load data from Google Sheets or upload an Excel export to begin.")
+        st.stop()
+
+    dexa_sheet = sheets.get("Dexa")
+    if dexa_sheet is None:
+        st.error("Expected sheet 'Dexa' not found.")
+        st.stop()
+
+    dexa_long = normalize_dexa_data(dexa_sheet)
+    if dexa_long.empty:
+        st.error("No usable Dexa measurements were found.")
+        st.stop()
+
+    latest_date = pd.to_datetime(dexa_long["Date"].max())
+    if st.session_state.get("_dexa_metric_selection_scope") != "all_rows":
+        st.session_state.pop("dexa_metric_selection", None)
+        st.session_state["_dexa_metric_selection_scope"] = "all_rows"
+
+    render_plotly_zoom_sync(
+        "dexa",
+        dexa_long["Date"].min(),
+        dexa_long["Date"].max(),
+    )
+    dexa_time_start, dexa_time_end = render_time_controls(
+        "dexa",
+        dexa_long["Date"].min(),
+        dexa_long["Date"].max(),
+    )
+
+    with hero_placeholder.container():
+        render_page_hero(
+            "Dexa",
+            "Body composition, visceral fat, lean-mass balance, and bone-density trends from your DEXA scans.",
+            pills=["Body composition", "Lean mass balance", "Bone density"],
+            eyebrow="Biomarker Studio",
+        )
+
+    data = dexa_long[
+        (dexa_long["Date"] >= dexa_time_start) &
+        (dexa_long["Date"] <= dexa_time_end + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1))
+    ].copy()
+
+    render_section_header(
+        "Headline Numbers",
+        "",
+        "Summary",
+    )
+    summary_rows = get_dexa_latest_rows(dexa_long, "Summary")
+    if summary_rows.empty:
+        st.info("No Summary metrics are available in the selected time window.")
+    else:
+        render_dexa_summary_cards(summary_rows, latest_date)
+
+    selected_tests = (
+        dexa_long
+        .sort_values("row_order")["test"]
+        .drop_duplicates()
+        .tolist()
+    )
+
+    with st.sidebar.expander("Filters", expanded=False):
+        search = st.text_input("Search Dexa metric", key="dexa_search")
+        if search:
+            candidates = [t for t in selected_tests if search.lower() in t.lower()]
+        else:
+            candidates = selected_tests
+        current_selection = st.session_state.get("dexa_metric_selection")
+        if isinstance(current_selection, list):
+            st.session_state["dexa_metric_selection"] = [t for t in current_selection if t in candidates]
+        tests_selected = st.multiselect(
+            "Select metrics to visualize",
+            options=candidates,
+            default=candidates[:len(candidates)],
+            key="dexa_metric_selection",
+        )
+
+    render_section_header(
+        "All Dexa Metrics",
+        "",
+        "Visual explorer",
+    )
+    if tests_selected:
+        ncols = 3
+        rows = (len(tests_selected) + ncols - 1) // ncols
+        for r in range(rows):
+            cols = st.columns(ncols)
+            for i in range(ncols):
+                idx = r * ncols + i
+                if idx >= len(tests_selected):
+                    continue
+                test_name = tests_selected[idx]
+                with cols[i]:
+                    latest_summary = latest_dexa_metric_summary(data, test_name)
+                    summary_html = f"<div class='chart-card-meta'>Latest: {html.escape(latest_summary)}</div>" if latest_summary else ""
+                    st.markdown(
+                        f"""
+                        <div class='chart-card-title'>{html.escape(test_name)}</div>
+                        {summary_html}
+                        """,
+                        unsafe_allow_html=True,
+                    )
+                    fig = plot_single_test(
+                        data,
+                        test_name,
+                        show_ref=True,
+                        show_regression=True,
+                        show_zones=True,
+                        date_window=(dexa_time_start, dexa_time_end),
+                    )
+                    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    else:
+        st.info("Use the sidebar to select Dexa metrics to visualize.")
+
+    render_section_header(
+        "Export",
+        "Download the current Dexa view as a filtered dataset.",
+        "Share & archive",
+    )
+    csv = data.sort_values(["category", "region", "metric", "Date"]).to_csv(index=False).encode("utf-8")
+    st.download_button("Download CSV", data=csv, file_name="dexa_data.csv", mime="text/csv")
 
 
 def page_fitbit_data():
@@ -2813,6 +3286,68 @@ section[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] > label:has(i
     color: #8a8f9b;
 }
 
+.dexa-summary-card {
+    min-height: 138px;
+    margin-bottom: 0.9rem;
+    padding: 1rem 1.05rem 0.95rem;
+    border-radius: 18px;
+    border: 1px solid rgba(24, 50, 47, 0.08);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.9) 0%, rgba(250, 246, 240, 0.92) 100%);
+    box-shadow: 0 10px 28px rgba(21, 38, 35, 0.06);
+}
+
+.dexa-summary-card--good {
+    background: linear-gradient(180deg, rgba(236, 248, 241, 0.94) 0%, rgba(218, 237, 226, 0.92) 100%);
+    border-color: rgba(129, 178, 154, 0.32);
+}
+
+.dexa-summary-card--caution {
+    background: linear-gradient(180deg, rgba(255, 248, 230, 0.95) 0%, rgba(248, 232, 194, 0.92) 100%);
+    border-color: rgba(242, 204, 143, 0.48);
+}
+
+.dexa-summary-card--alert {
+    background: linear-gradient(180deg, rgba(255, 238, 232, 0.96) 0%, rgba(248, 217, 207, 0.92) 100%);
+    border-color: rgba(224, 122, 95, 0.38);
+}
+
+.dexa-summary-subsection {
+    margin: 1.05rem 0 0.55rem;
+    font-size: 0.82rem;
+    font-weight: 800;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+}
+
+.dexa-summary-label {
+    min-height: 2.25rem;
+    font-size: 0.78rem;
+    line-height: 1.25;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+}
+
+.dexa-summary-value {
+    margin-top: 0.5rem;
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: clamp(1.35rem, 1.5vw, 1.9rem);
+    line-height: 1.05;
+    font-weight: 700;
+    letter-spacing: -0.04em;
+    color: var(--ink);
+    overflow-wrap: anywhere;
+}
+
+.dexa-summary-footnote {
+    margin-top: 0.55rem;
+    font-size: 0.78rem;
+    line-height: 1.35;
+    color: #7a7f8c;
+}
+
 .page-hero {
     position: relative;
     overflow: hidden;
@@ -3120,7 +3655,7 @@ with st.sidebar:
 
     page = st.radio(
         "Navigation",
-        ["Lifts", "Fitbit Data", "Blood Panel", "Settings"],
+        ["Lifts", "Fitbit Data", "Blood Panel", "Dexa", "Settings"],
         label_visibility="collapsed",
         key="page_nav",
     )
@@ -3160,6 +3695,8 @@ page_root = st.empty()
 with page_root.container():
     if page == "Blood Panel":
         page_blood_panel()
+    elif page == "Dexa":
+        page_dexa()
     elif page == "Fitbit Data":
         page_fitbit_data()
     elif page == "Lifts":

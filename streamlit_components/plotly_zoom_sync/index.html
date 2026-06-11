@@ -178,21 +178,10 @@
           return;
         }
 
-        let parentDocument;
-        try {
-          parentDocument = window.parent.document;
-        } catch (error) {
-          return;
-        }
-
-        state.observer = new MutationObserver(() => {
+        state.observer = window.setInterval(() => {
           attachToAllPlots();
           Streamlit.setFrameHeight(0);
-        });
-        state.observer.observe(parentDocument.body, {
-          childList: true,
-          subtree: true,
-        });
+        }, 350);
       }
 
       window.addEventListener("message", (event) => {
