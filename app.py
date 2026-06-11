@@ -24,7 +24,7 @@ import strength_standards
 # -----------------------------
 # Config
 # -----------------------------
-EXCLUDE_SHEETS = {"All Data", "Optimal Ranges", "Graphs", "Labs and notes", "NN Metabolic Scorecard", "Dexa"}
+EXCLUDE_SHEETS = {"All Data", "Optimal Ranges", "Centiles", "Graphs", "Labs and notes", "NN Metabolic Scorecard", "Dexa"}
 DEFAULT_GROUP_SHEETS = []  # will be filled dynamically
 TIME_PRESETS = ["30 days", "90 days", "1 year", "All time", "Custom"]
 LAST_PLOTLY_ZOOM_EVENT_KEY = "_last_plotly_zoom_event_id"
@@ -37,6 +37,32 @@ STRENGTH_STANDARD_BAND_COLORS = {
     "Advanced": "rgba(126, 200, 171, 0.24)",
     "Elite": "rgba(150, 206, 255, 0.20)",
     "Elite+": "rgba(169, 145, 255, 0.24)",
+}
+CENTILE_COLUMNS = [
+    ("top_1", 1.00, "Top 1%"),
+    ("top_5", 0.92, "Top 5%"),
+    ("top_10", 0.84, "Top 10%"),
+    ("top_20", 0.76, "Top 20%"),
+    ("top_30", 0.68, "Top 30%"),
+    ("average", 0.50, "Average"),
+    ("bottom_30", 0.32, "Bottom 30%"),
+    ("bottom_20", 0.24, "Bottom 20%"),
+    ("bottom_10", 0.16, "Bottom 10%"),
+    ("bottom_5", 0.08, "Bottom 5%"),
+    ("bottom_1", 0.00, "Bottom 1%"),
+]
+CENTILE_METRICS_CATEGORY = "Centile metrics"
+# Warm-theme gradient anchors for centile shading: 0 = worst centile, 1 = best.
+CENTILE_GRADIENT = [
+    (0.00, "#E07A5F"),
+    (0.20, "#F1B07B"),
+    (0.40, "#F2CC8F"),
+    (0.60, "#BED8C7"),
+    (0.80, "#81B29A"),
+    (1.00, "#4F8F73"),
+]
+DEXA_CENTILE_TEST_MAP = {
+    "Tissue %Fat": "Fat Percentage",
 }
 LIFTS_PAGE_CONFIG = [
     {"label": "Bench", "source_titles": ["Bench Press (Barbell)"]},
@@ -313,9 +339,13 @@ def normalize_dexa_data(df: pd.DataFrame) -> pd.DataFrame:
 
 def normalize_ranges(df: pd.DataFrame) -> pd.DataFrame:
     df2 = df.copy()
+    df2.columns = [str(c).strip() for c in df2.columns]
+    df2 = df2.rename(columns={"Test Instalab Values": "Test"})
     # Keep essential columns if present
     keep = [c for c in ["Test","Unit","Optimal Range (lower)","Optimal Range (borderline)","Optimal Range (upper)"] if c in df2.columns]
     df2 = df2[keep]
+    if "Test" not in df2.columns:
+        return pd.DataFrame(columns=["test", "unit", "lower", "upper", "borderline"])
     df2 = df2[df2["Test"].notna()]
     df2 = df2[df2["Test"].astype(str).str.lower()!="instalab values"]
     # Coerce numeric
@@ -334,6 +364,32 @@ def normalize_ranges(df: pd.DataFrame) -> pd.DataFrame:
         df2["unit"] = df2["unit"].astype(str).str.strip().replace("", np.nan)
     return df2
 
+
+def normalize_centiles(df: Optional[pd.DataFrame]) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    df2 = df.copy()
+    df2.columns = [str(c).strip() for c in df2.columns]
+    required = {"biomarker", "side", "direction"}
+    if not required.issubset(df2.columns):
+        return pd.DataFrame()
+
+    df2["biomarker"] = df2["biomarker"].astype(str).str.strip()
+    df2 = df2[df2["biomarker"].ne("")]
+    df2["test_key"] = df2["biomarker"].str.lower()
+    df2["side"] = df2["side"].astype(str).str.strip().str.lower().replace("", "main")
+    df2["direction"] = df2["direction"].astype(str).str.strip().str.lower()
+
+    for col, _score, _label in CENTILE_COLUMNS:
+        if col in df2.columns:
+            df2[col] = pd.to_numeric(df2[col], errors="coerce")
+        else:
+            df2[col] = np.nan
+
+    return df2
+
+
 def attach_ranges(long: pd.DataFrame, ranges: pd.DataFrame, policy: str = "union") -> pd.DataFrame:
     r2 = ranges.copy()
     l2 = long.copy()
@@ -346,12 +402,18 @@ def attach_ranges(long: pd.DataFrame, ranges: pd.DataFrame, policy: str = "union
                 return v
         return np.nan
 
+    def numeric_bound(s, reducer):
+        values = pd.to_numeric(s, errors="coerce").dropna()
+        if values.empty:
+            return np.nan
+        return reducer(values)
+
     if policy == "intersection":
-        lower_agg = lambda s: np.nanmax(pd.to_numeric(s, errors="coerce"))
-        upper_agg = lambda s: np.nanmin(pd.to_numeric(s, errors="coerce"))
+        lower_agg = lambda s: numeric_bound(s, np.max)
+        upper_agg = lambda s: numeric_bound(s, np.min)
     else:  # "union" (default)
-        lower_agg = lambda s: np.nanmin(pd.to_numeric(s, errors="coerce"))
-        upper_agg = lambda s: np.nanmax(pd.to_numeric(s, errors="coerce"))
+        lower_agg = lambda s: numeric_bound(s, np.min)
+        upper_agg = lambda s: numeric_bound(s, np.max)
 
     # One canonical row per test_key
     rcanon = (
@@ -587,10 +649,183 @@ def apply_warm_theme(fig: go.Figure) -> go.Figure:
     return fig
 
 
+def centile_band_color(score: float) -> str:
+    score = min(1.0, max(0.0, float(score)))
+    for (s0, c0), (s1, c1) in zip(CENTILE_GRADIENT, CENTILE_GRADIENT[1:]):
+        if score <= s1:
+            t = 0.0 if s1 == s0 else (score - s0) / (s1 - s0)
+            rgb0 = tuple(int(c0[i:i+2], 16) for i in (1, 3, 5))
+            rgb1 = tuple(int(c1[i:i+2], 16) for i in (1, 3, 5))
+            r, g, b = (round(a + t * (b_ - a)) for a, b_ in zip(rgb0, rgb1))
+            return f"#{r:02X}{g:02X}{b:02X}"
+    return CENTILE_GRADIENT[-1][1]
+
+
+def centile_points(row: pd.Series) -> List[Tuple[float, float, str]]:
+    """Return (value, score, label) per defined centile, sorted by value."""
+    points = []
+    for col, score, label in CENTILE_COLUMNS:
+        value = row.get(col)
+        if pd.notna(value):
+            points.append((float(value), score, label))
+    points.sort(key=lambda item: item[0])
+
+    deduped = []
+    for value, score, label in points:
+        if deduped and abs(value - deduped[-1][0]) < 1e-12:
+            if score > deduped[-1][1]:
+                deduped[-1] = (value, score, label)
+        else:
+            deduped.append((value, score, label))
+    return deduped
+
+
+def centile_score_at(points: List[Tuple[float, float, str]], value: float) -> float:
+    """Interpolate a centile score at `value` from one side's points.
+
+    Beyond the worst defined centile the score clamps to that centile; beyond
+    the best it clamps to 1.0, since blank good-end columns (e.g. the high side
+    of HDL) mean "no penalty in this direction", not "top 20% at best".
+    """
+    best_first = points[0][1] >= points[-1][1]
+    if value <= points[0][0]:
+        return 1.0 if best_first else points[0][1]
+    if value >= points[-1][0]:
+        return points[-1][1] if best_first else 1.0
+    for (v0, s0, _l0), (v1, s1, _l1) in zip(points, points[1:]):
+        if v0 <= value <= v1:
+            t = 0.0 if v1 == v0 else (value - v0) / (v1 - v0)
+            return s0 + t * (s1 - s0)
+    return points[-1][1]
+
+
+def get_centile_rows(centiles: Optional[pd.DataFrame], test: str) -> pd.DataFrame:
+    if centiles is None or centiles.empty or "test_key" not in centiles.columns:
+        return pd.DataFrame()
+    test_key = str(test).strip().lower()
+    return centiles[centiles["test_key"] == test_key].copy()
+
+
+def get_centile_metric_names(centiles: Optional[pd.DataFrame], available_tests: List[str]) -> List[str]:
+    if centiles is None or centiles.empty or "biomarker" not in centiles.columns:
+        return []
+
+    available = {str(test).strip() for test in available_tests}
+    names = []
+    seen = set()
+    for biomarker in centiles["biomarker"].dropna().astype(str).str.strip():
+        if biomarker in available and biomarker not in seen:
+            names.append(biomarker)
+            seen.add(biomarker)
+    return names
+
+
+def render_background_view_controls(scope: str) -> str:
+    st.sidebar.markdown('<hr class="sidebar-divider">', unsafe_allow_html=True)
+    # Shadow key keeps the choice alive across page switches, since Streamlit
+    # drops widget state for pages that don't render the widget.
+    persist_key = f"{scope}_biohacker_on"
+    biohacker = st.sidebar.toggle(
+        "Biohacker mode",
+        value=st.session_state.get(persist_key, False),
+        key=f"{scope}_biohacker_mode",
+        help="Shade graph backgrounds by population centiles instead of healthy ranges.",
+    )
+    st.session_state[persist_key] = biohacker
+    return "Biohacker" if biohacker else "Standard"
+
+
+def add_centile_zones(
+    fig: go.Figure,
+    y: pd.Series,
+    centile_rows: pd.DataFrame,
+    x0,
+    x1,
+) -> bool:
+    point_sets = [centile_points(row) for _, row in centile_rows.iterrows()]
+    point_sets = [points for points in point_sets if points]
+    if not point_sets:
+        return False
+
+    # Merge boundaries from all sides (e.g. low_side + high_side rows) into one
+    # set of bands; each band is scored at its midpoint as the worst centile
+    # across sides, so two-sided metrics shade green in the middle and degrade
+    # toward both extremes.
+    boundaries = []
+    for points in point_sets:
+        for value, _score, label in points:
+            if not any(abs(value - b) < 1e-9 * max(1.0, abs(value)) for b, _ in boundaries):
+                boundaries.append((value, label))
+    boundaries.sort(key=lambda item: item[0])
+
+    # An open-ended extreme is encoded as 0 in the sheet (e.g. "bottom 1% = 0"
+    # for Albumin, or "top 1% = 0" for lower-is-better metrics like ApoB).
+    # Keep such a sentinel off the axis when it sits beyond the data and is
+    # separated from its neighbour by a gap far larger than the typical
+    # centile gap (which spares genuine zeros like hs-CRP's); the outermost
+    # band still shades with that centile's colour.
+    values = [value for value, _label in boundaries]
+    if len(values) >= 3:
+        gaps = [b - a for a, b in zip(values, values[1:])]
+        typical_gap = float(np.median(gaps))
+        if (
+            typical_gap > 0
+            and values[0] <= 0
+            and values[1] - values[0] > 3 * typical_gap
+            and values[0] < float(y.min())
+        ):
+            boundaries = boundaries[1:]
+
+    y_candidates = [y.min(), y.max()]
+    y_candidates.extend(value for value, _label in boundaries)
+    y_min, y_max = min(y_candidates), max(y_candidates)
+    span = (y_max - y_min) or 1.0
+    y_min -= 0.05 * span
+    y_max += 0.05 * span
+    fig.update_yaxes(range=[y_min, y_max])
+
+    edges = [y_min] + [value for value, _label in boundaries if y_min < value < y_max] + [y_max]
+    for lo, hi in zip(edges, edges[1:]):
+        if hi <= lo:
+            continue
+        mid = (lo + hi) / 2.0
+        score = min(centile_score_at(points, mid) for points in point_sets)
+        fig.add_shape(
+            type="rect", xref="x", yref="y", x0=x0, x1=x1, y0=lo, y1=hi,
+            fillcolor=centile_band_color(score), opacity=0.22, line_width=0, layer="below"
+        )
+
+    # Label the transitions on a right-hand axis, skipping ticks that would
+    # collide with the previous one.
+    min_sep = 0.035 * (y_max - y_min)
+    tick_vals, tick_text = [], []
+    for value, label in boundaries:
+        if y_min < value < y_max and (not tick_vals or value - tick_vals[-1] >= min_sep):
+            tick_vals.append(value)
+            tick_text.append(label)
+    if tick_vals:
+        fig.add_trace(go.Scatter(
+            x=[x0], y=[tick_vals[0]], yaxis="y2", mode="markers",
+            marker=dict(opacity=0), showlegend=False, hoverinfo="skip",
+        ))
+        fig.update_layout(yaxis2=dict(
+            overlaying="y", side="right", matches="y",
+            showgrid=False, zeroline=False, automargin=True,
+            tickvals=tick_vals, ticktext=tick_text,
+            ticks="outside", ticklen=3, tickcolor="rgba(24, 50, 47, 0.25)",
+            tickfont=dict(size=9, color="#4F5D5A"),
+        ))
+
+    return True
+
+
 def plot_single_test(df: pd.DataFrame, test: str,
                      show_ref: bool=True, show_regression: bool=False,
                      show_zones: bool=True, range_policy: str="union",
-                     date_window: Optional[Tuple[pd.Timestamp, pd.Timestamp]] = None) -> go.Figure:
+                     date_window: Optional[Tuple[pd.Timestamp, pd.Timestamp]] = None,
+                     background_view: str="Standard",
+                     centiles: Optional[pd.DataFrame]=None,
+                     centile_test: Optional[str]=None) -> go.Figure:
     g = df[df["test"] == test].sort_values("Date")
     fig = go.Figure()
     if g.empty:
@@ -612,8 +847,22 @@ def plot_single_test(df: pd.DataFrame, test: str,
     if pd.notna(lower) and pd.notna(upper) and lower > upper:
         lower, upper = upper, lower
 
+    if date_window is not None:
+        x0 = pd.to_datetime(date_window[0])
+        x1 = pd.to_datetime(date_window[1])
+    else:
+        x0, x1 = x.min(), x.max()
+
     # ---- background zones (green/orange/red) ----
-    if show_zones and (pd.notna(lower) or pd.notna(upper)):
+    centile_rows = get_centile_rows(centiles, centile_test or test)
+    use_centile_zones = (
+        show_zones
+        and background_view == "Biohacker"
+        and not centile_rows.empty
+        and add_centile_zones(fig, y, centile_rows, x0, x1)
+    )
+
+    if show_zones and not use_centile_zones and (pd.notna(lower) or pd.notna(upper)):
         # compute a sensible y-range so the shading fully covers the plot
         y_candidates = [y.min(), y.max()]
         for v in (lower, upper, borderline):
@@ -624,12 +873,6 @@ def plot_single_test(df: pd.DataFrame, test: str,
         y_min -= 0.05 * span
         y_max += 0.05 * span
         fig.update_yaxes(range=[y_min, y_max])
-
-        if date_window is not None:
-            x0 = pd.to_datetime(date_window[0])
-            x1 = pd.to_datetime(date_window[1])
-        else:
-            x0, x1 = x.min(), x.max()
 
         def rect(y0, y1, color_hex):
             # draw behind series
@@ -700,7 +943,7 @@ def plot_single_test(df: pd.DataFrame, test: str,
                                  line=dict(dash="dash", color="#D4C5B5", width=2)))
 
     # Optional dotted lines exactly at bounds
-    if show_ref:
+    if show_ref and not use_centile_zones:
         if pd.notna(lower):     fig.add_hline(y=lower,     line_dash="dot")
         if pd.notna(upper):     fig.add_hline(y=upper,     line_dash="dot")
         if pd.notna(borderline):fig.add_hline(y=borderline, line_dash="dot")
@@ -1836,6 +2079,7 @@ def page_blood_panel():
     # Extract key sheets
     all_data = sheets.get("All Data")
     ranges = sheets.get("Optimal Ranges")
+    centiles = sheets.get("Centiles")
     notes = sheets.get("Labs and notes")
     if all_data is None or ranges is None:
         st.error("Expected sheets 'All Data' and 'Optimal Ranges' not found.")
@@ -1844,6 +2088,7 @@ def page_blood_panel():
     # Normalize
     long = normalize_all_data(all_data)
     ranges_n = normalize_ranges(ranges)
+    centiles_n = normalize_centiles(centiles)
     merged = attach_ranges(long, ranges_n)
     if isinstance(notes, pd.DataFrame):
         merged = attach_lab_notes(merged, notes)
@@ -1854,7 +2099,11 @@ def page_blood_panel():
 
     # Groups
     groups = load_groups_from_sheets(sheets)
-    group_names = ["(All)"] + list(groups.keys())
+    centile_metric_names = get_centile_metric_names(centiles_n, sorted(merged["test"].unique().tolist()))
+    group_names = ["(All)"]
+    if centile_metric_names:
+        group_names.append(CENTILE_METRICS_CATEGORY)
+    group_names.extend(groups.keys())
     st.sidebar.markdown('<hr class="sidebar-divider">', unsafe_allow_html=True)
     st.sidebar.markdown('<div class="section-header" style="border-bottom:none; margin-top:0.5rem; font-size:1.1rem;">Category</div>', unsafe_allow_html=True)
     default_group = "Inflamation"
@@ -1865,7 +2114,9 @@ def page_blood_panel():
     if st.session_state.get("blood_panel_category") not in group_names:
         st.session_state["blood_panel_category"] = default_selection
     grp = st.sidebar.selectbox("Category", options=group_names, key="blood_panel_category")
-    if grp != "(All)":
+    if grp == CENTILE_METRICS_CATEGORY:
+        selected_tests = centile_metric_names
+    elif grp != "(All)":
         selected_tests = groups.get(grp, [])
     else:
         selected_tests = sorted(merged["test"].unique().tolist())
@@ -1880,6 +2131,7 @@ def page_blood_panel():
         merged["Date"].min(),
         merged["Date"].max(),
     )
+    background_view = render_background_view_controls("blood_panel")
 
     hero_title = grp if grp != "(All)" else "Blood Panel"
     with hero_placeholder.container():
@@ -2057,6 +2309,8 @@ def page_blood_panel():
                         show_regression=show_trend,
                         show_zones=show_zones,
                         date_window=(blood_time_start, blood_time_end),
+                        background_view=background_view,
+                        centiles=centiles_n,
                     )
                     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
     else:
@@ -2087,7 +2341,14 @@ def page_blood_panel():
             # Create a simple HTML with embedded plotly divs
             html_parts = []
             for t in tests_selected:
-                fig = plot_single_test(data, t, show_ref=show_ref, show_regression=show_trend)
+                fig = plot_single_test(
+                    data,
+                    t,
+                    show_ref=show_ref,
+                    show_regression=show_trend,
+                    background_view=background_view,
+                    centiles=centiles_n,
+                )
                 html_parts.append(fig.to_html(full_html=False, include_plotlyjs="cdn"))
             html = f"<html><head><meta charset='utf-8'><title>Blood Panel Export</title></head><body>{''.join(html_parts)}</body></html>"
             st.download_button("Download file", data=html, file_name="blood_panel_export.html", mime="text/html")
@@ -2149,6 +2410,7 @@ def page_dexa():
     if dexa_sheet is None:
         st.error("Expected sheet 'Dexa' not found.")
         st.stop()
+    centiles_n = normalize_centiles(sheets.get("Centiles"))
 
     dexa_long = normalize_dexa_data(dexa_sheet)
     if dexa_long.empty:
@@ -2170,6 +2432,7 @@ def page_dexa():
         dexa_long["Date"].min(),
         dexa_long["Date"].max(),
     )
+    background_view = "Biohacker"
 
     with hero_placeholder.container():
         render_page_hero(
@@ -2250,6 +2513,9 @@ def page_dexa():
                         show_regression=True,
                         show_zones=True,
                         date_window=(dexa_time_start, dexa_time_end),
+                        background_view=background_view,
+                        centiles=centiles_n,
+                        centile_test=DEXA_CENTILE_TEST_MAP.get(test_name),
                     )
                     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
     else:
