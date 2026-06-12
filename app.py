@@ -721,11 +721,11 @@ def get_centile_metric_names(centiles: Optional[pd.DataFrame], available_tests: 
 
 
 def render_background_view_controls(scope: str) -> str:
-    sidebar_panel.markdown('<hr class="sidebar-divider">', unsafe_allow_html=True)
+    st.sidebar.markdown('<hr class="sidebar-divider">', unsafe_allow_html=True)
     # Shadow key keeps the choice alive across page switches, since Streamlit
     # drops widget state for pages that don't render the widget.
     persist_key = f"{scope}_biohacker_on"
-    biohacker = sidebar_panel.toggle(
+    biohacker = st.sidebar.toggle(
         "Biohacker mode",
         value=st.session_state.get(persist_key, False),
         key=f"{scope}_biohacker_mode",
@@ -736,7 +736,7 @@ def render_background_view_controls(scope: str) -> str:
         return "Standard"
 
     enhanced_persist_key = f"{scope}_biohacker_enhanced_on"
-    enhanced = sidebar_panel.toggle(
+    enhanced = st.sidebar.toggle(
         "Enhanced view",
         value=st.session_state.get(enhanced_persist_key, False),
         key=f"{scope}_biohacker_enhanced",
@@ -1988,8 +1988,8 @@ def render_time_controls(scope: str, min_date: pd.Timestamp, max_date: pd.Timest
     st.session_state[start_key] = persisted_start.date()
     st.session_state[end_key] = persisted_end.date()
 
-    sidebar_panel.markdown('<hr class="sidebar-divider">', unsafe_allow_html=True)
-    sidebar_panel.markdown('<div class="section-header" style="border-bottom:none; margin-top:0.5rem; font-size:1.1rem;">Time</div>', unsafe_allow_html=True)
+    st.sidebar.markdown('<hr class="sidebar-divider">', unsafe_allow_html=True)
+    st.sidebar.markdown('<div class="section-header" style="border-bottom:none; margin-top:0.5rem; font-size:1.1rem;">Time</div>', unsafe_allow_html=True)
 
     # Label every slider stop ourselves (Streamlit only labels the ends) and
     # highlight the active one; the floating thumb value and built-in end
@@ -2007,9 +2007,9 @@ def render_time_controls(scope: str, min_date: pd.Timestamp, max_date: pd.Timest
             pos = f"left:{i / last_index * 100:.0f}%; transform:translateX(-50%);"
         cls = "time-stop active" if p == active_preset else "time-stop"
         stops.append(f'<span class="{cls}" style="{pos}">{short_labels.get(p, p)}</span>')
-    sidebar_panel.markdown(f'<div class="time-stop-row">{"".join(stops)}</div>', unsafe_allow_html=True)
+    st.sidebar.markdown(f'<div class="time-stop-row">{"".join(stops)}</div>', unsafe_allow_html=True)
 
-    preset = sidebar_panel.select_slider(
+    preset = st.sidebar.select_slider(
         "Time window",
         options=TIME_PRESETS,
         key=preset_key,
@@ -2017,7 +2017,7 @@ def render_time_controls(scope: str, min_date: pd.Timestamp, max_date: pd.Timest
     )
 
     if preset == "Custom":
-        start_col, end_col = sidebar_panel.columns(2)
+        start_col, end_col = st.sidebar.columns(2)
         with start_col:
             start_value = st.date_input(
                 "Start",
@@ -2069,7 +2069,7 @@ def page_blood_panel():
     """Original Blood Panel Explorer page — all existing logic intact."""
     hero_placeholder = st.empty()
 
-    with sidebar_panel:
+    with st.sidebar:
         # Convenience: auto-load local sheet_api_key.json if present
         local_key_path = os.path.join(os.path.dirname(__file__), "sheet_api_key.json")
         sheets = None
@@ -2145,8 +2145,8 @@ def page_blood_panel():
     if centile_metric_names:
         group_names.append(CENTILE_METRICS_CATEGORY)
     group_names.extend(groups.keys())
-    sidebar_panel.markdown('<hr class="sidebar-divider">', unsafe_allow_html=True)
-    sidebar_panel.markdown('<div class="section-header" style="border-bottom:none; margin-top:0.5rem; font-size:1.1rem;">Category</div>', unsafe_allow_html=True)
+    st.sidebar.markdown('<hr class="sidebar-divider">', unsafe_allow_html=True)
+    st.sidebar.markdown('<div class="section-header" style="border-bottom:none; margin-top:0.5rem; font-size:1.1rem;">Category</div>', unsafe_allow_html=True)
     default_group = "Inflamation"
     default_selection = default_group if default_group in group_names else group_names[0]
     pending_category = st.session_state.pop("blood_panel_category_target", None)
@@ -2154,7 +2154,7 @@ def page_blood_panel():
         st.session_state["blood_panel_category"] = pending_category
     if st.session_state.get("blood_panel_category") not in group_names:
         st.session_state["blood_panel_category"] = default_selection
-    grp = sidebar_panel.selectbox("Category", options=group_names, key="blood_panel_category")
+    grp = st.sidebar.selectbox("Category", options=group_names, key="blood_panel_category")
     if grp == CENTILE_METRICS_CATEGORY:
         selected_tests = centile_metric_names
     elif grp != "(All)":
@@ -2195,7 +2195,7 @@ def page_blood_panel():
                 st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
-    with sidebar_panel.expander("Filters", expanded=False):
+    with st.sidebar.expander("Filters", expanded=False):
         search = st.text_input("Search test name")
         if search:
             candidates = [t for t in selected_tests if search.lower() in t.lower()]
@@ -2404,7 +2404,7 @@ def page_dexa():
     """DEXA body-composition explorer backed by the Dexa Google Sheet tab."""
     hero_placeholder = st.empty()
 
-    with sidebar_panel:
+    with st.sidebar:
         local_key_path = os.path.join(os.path.dirname(__file__), "sheet_api_key.json")
         sheets = None
         if os.path.exists(local_key_path):
@@ -2506,7 +2506,7 @@ def page_dexa():
         .tolist()
     )
 
-    with sidebar_panel.expander("Filters", expanded=False):
+    with st.sidebar.expander("Filters", expanded=False):
         search = st.text_input("Search Dexa metric", key="dexa_search")
         if search:
             candidates = [t for t in selected_tests if search.lower() in t.lower()]
@@ -2679,8 +2679,8 @@ def page_fitbit_data():
             fitbit_min_date,
             fitbit_max_date,
         )
-        sidebar_panel.markdown('<hr class="sidebar-divider">', unsafe_allow_html=True)
-        show_primary_fitbit_series = sidebar_panel.toggle(
+        st.sidebar.markdown('<hr class="sidebar-divider">', unsafe_allow_html=True)
+        show_primary_fitbit_series = st.sidebar.toggle(
             "Show daily data series",
             value=True,
             key="fitbit_show_primary_series",
@@ -4009,11 +4009,6 @@ with st.sidebar:
         label_visibility="collapsed",
         key="page_nav",
     )
-
-# Page-specific sidebar controls render into this placeholder so a page switch
-# clears the previous page's controls immediately, instead of leaving them
-# visible until the rerun completes (same trick as page_root below).
-sidebar_panel = st.sidebar.empty().container()
 
 # ---- Handle Fitbit OAuth redirect (before page routing) ----
 _oauth_code = st.query_params.get("code")
