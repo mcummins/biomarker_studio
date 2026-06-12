@@ -732,7 +732,18 @@ def render_background_view_controls(scope: str) -> str:
         help="Shade graph backgrounds by population centiles instead of healthy ranges.",
     )
     st.session_state[persist_key] = biohacker
-    return "Biohacker" if biohacker else "Standard"
+    if not biohacker:
+        return "Standard"
+
+    enhanced_persist_key = f"{scope}_biohacker_enhanced_on"
+    enhanced = st.sidebar.toggle(
+        "Enhanced view",
+        value=st.session_state.get(enhanced_persist_key, False),
+        key=f"{scope}_biohacker_enhanced",
+        help="Zoom the axis to your data instead of the full centile range, making small centile shifts easier to see.",
+    )
+    st.session_state[enhanced_persist_key] = enhanced
+    return "Biohacker Enhanced" if enhanced else "Biohacker"
 
 
 def add_centile_zones(
@@ -741,6 +752,7 @@ def add_centile_zones(
     centile_rows: pd.DataFrame,
     x0,
     x1,
+    fit_to_data: bool = False,
 ) -> bool:
     point_sets = [centile_points(row) for _, row in centile_rows.iterrows()]
     point_sets = [points for points in point_sets if points]
@@ -777,11 +789,13 @@ def add_centile_zones(
             boundaries = boundaries[1:]
 
     y_candidates = [y.min(), y.max()]
-    y_candidates.extend(value for value, _label in boundaries)
+    if not fit_to_data:
+        y_candidates.extend(value for value, _label in boundaries)
     y_min, y_max = min(y_candidates), max(y_candidates)
     span = (y_max - y_min) or 1.0
-    y_min -= 0.05 * span
-    y_max += 0.05 * span
+    pad = 0.12 if fit_to_data else 0.05
+    y_min -= pad * span
+    y_max += pad * span
     fig.update_yaxes(range=[y_min, y_max])
 
     edges = [y_min] + [value for value, _label in boundaries if y_min < value < y_max] + [y_max]
@@ -857,9 +871,12 @@ def plot_single_test(df: pd.DataFrame, test: str,
     centile_rows = get_centile_rows(centiles, centile_test or test)
     use_centile_zones = (
         show_zones
-        and background_view == "Biohacker"
+        and background_view in ("Biohacker", "Biohacker Enhanced")
         and not centile_rows.empty
-        and add_centile_zones(fig, y, centile_rows, x0, x1)
+        and add_centile_zones(
+            fig, y, centile_rows, x0, x1,
+            fit_to_data=(background_view == "Biohacker Enhanced"),
+        )
     )
 
     if show_zones and not use_centile_zones and (pd.notna(lower) or pd.notna(upper)):
@@ -2663,8 +2680,7 @@ def page_fitbit_data():
             fitbit_max_date,
         )
         st.sidebar.markdown('<hr class="sidebar-divider">', unsafe_allow_html=True)
-        st.sidebar.markdown('<div class="section-header" style="border-bottom:none; margin-top:0.5rem; font-size:1.1rem;">Display</div>', unsafe_allow_html=True)
-        show_primary_fitbit_series = st.sidebar.checkbox(
+        show_primary_fitbit_series = st.sidebar.toggle(
             "Show daily data series",
             value=True,
             key="fitbit_show_primary_series",
@@ -3443,48 +3459,55 @@ section[data-testid="stSidebar"] .stMultiSelect [data-baseweb="tag"] svg {
     fill: #35524c !important;
 }
 
-section[data-testid="stSidebar"] .stRadio > div {
-    gap: 0.5rem;
+/* ---- Sidebar navigation menu (the page radio, restyled as a nav list) ---- */
+section[data-testid="stSidebar"] div[role="radiogroup"][aria-label="Navigation"] {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
 }
 
-section[data-testid="stSidebar"] .stRadio label {
-    background: rgba(255, 255, 255, 0.55);
-    border: 1px solid rgba(24, 50, 47, 0.08);
-    border-radius: 14px;
-    padding: 0.7rem 0.9rem;
+section[data-testid="stSidebar"] div[role="radiogroup"][aria-label="Navigation"] > label {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    margin: 0 !important;
+    padding: 0.55rem 0.85rem !important;
+    border-radius: 12px !important;
+    background: transparent !important;
+    border: none !important;
+    cursor: pointer;
+    transition: background 0.15s ease;
 }
 
-section[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] {
-    gap: 0.55rem;
+/* hide the radio dot */
+section[data-testid="stSidebar"] div[role="radiogroup"][aria-label="Navigation"] > label > div:first-child {
+    display: none !important;
 }
 
-section[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] > label {
-    min-height: 48px;
-    background: rgba(255, 255, 255, 0.72) !important;
-    border: 1px solid rgba(24, 50, 47, 0.08) !important;
-    border-radius: 16px !important;
-    padding: 0.75rem 0.9rem !important;
-    transition: background 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
-}
-
-section[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] > label:hover {
-    background: rgba(255, 255, 255, 0.92) !important;
-}
-
-section[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] > label p {
-    color: var(--ink) !important;
-    font-weight: 700 !important;
+section[data-testid="stSidebar"] div[role="radiogroup"][aria-label="Navigation"] > label p {
+    color: var(--muted) !important;
+    font-size: 0.95rem !important;
+    font-weight: 600 !important;
     letter-spacing: -0.01em;
+    transition: color 0.15s ease;
 }
 
-section[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] > label:has(input:checked) {
-    background: linear-gradient(135deg, var(--accent) 0%, var(--accent-dark) 100%) !important;
-    border-color: transparent !important;
-    box-shadow: 0 12px 28px rgba(217, 107, 66, 0.22) !important;
+section[data-testid="stSidebar"] div[role="radiogroup"][aria-label="Navigation"] > label:hover {
+    background: rgba(24, 50, 47, 0.06) !important;
 }
 
-section[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] > label:has(input:checked) p {
-    color: #fffdfb !important;
+section[data-testid="stSidebar"] div[role="radiogroup"][aria-label="Navigation"] > label:hover p {
+    color: var(--ink) !important;
+}
+
+section[data-testid="stSidebar"] div[role="radiogroup"][aria-label="Navigation"] > label:has(input:checked) {
+    background: var(--accent-soft) !important;
+    box-shadow: inset 3px 0 0 var(--accent);
+}
+
+section[data-testid="stSidebar"] div[role="radiogroup"][aria-label="Navigation"] > label:has(input:checked) p {
+    color: var(--accent-dark) !important;
+    font-weight: 800 !important;
 }
 
 .sidebar-divider {
