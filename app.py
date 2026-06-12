@@ -1859,10 +1859,33 @@ def inject_page_switch_cleaner() -> None:
           script.id = "bp-page-switch-cleaner";
           script.textContent = `(function() {
             const CLASS = "bp-page-switching";
+            // Block containers (expanders, tabs, forms, column rows) never get
+            // the data-stale marker themselves - only the leaf elements inside
+            // them do - so their chrome (headers, tab buttons) would survive
+            // the CSS rule. Tag blocks whose marked descendants are ALL stale.
+            const BLOCKS = '[data-testid="stExpander"], [data-testid="stTabs"], [data-testid="stForm"], [data-testid="stHorizontalBlock"]';
             let timer = null;
+            let observer = null;
 
-            function stopWatcher() {
+            function updateStaleBlocks() {
+              document.querySelectorAll(BLOCKS).forEach((block) => {
+                let anyStale = false;
+                let anyFresh = false;
+                block.querySelectorAll('[data-stale]').forEach((el) => {
+                  if (el.getAttribute('data-stale') === 'true') anyStale = true;
+                  else anyFresh = true;
+                });
+                block.classList.toggle('bp-stale-block', anyStale && !anyFresh);
+              });
+            }
+
+            function endSwitch() {
+              document.body.classList.remove(CLASS);
               if (timer) { clearInterval(timer); timer = null; }
+              if (observer) { observer.disconnect(); observer = null; }
+              document.querySelectorAll('.bp-stale-block').forEach((el) => {
+                el.classList.remove('bp-stale-block');
+              });
             }
 
             document.body.addEventListener("change", (ev) => {
@@ -1871,7 +1894,20 @@ def inject_page_switch_cleaner() -> None:
               if (!input.matches('div[role="radiogroup"][aria-label="Navigation"] input[type="radio"]')) return;
 
               document.body.classList.add(CLASS);
-              stopWatcher();
+              if (timer) { clearInterval(timer); timer = null; }
+              if (observer) { observer.disconnect(); observer = null; }
+
+              updateStaleBlocks();
+              // MutationObserver callbacks are batched microtasks and still
+              // fire in throttled/background tabs (unlike rAF), so call the
+              // update directly.
+              observer = new MutationObserver(updateStaleBlocks);
+              observer.observe(document.body, {
+                subtree: true,
+                childList: true,
+                attributes: true,
+                attributeFilter: ["data-stale"],
+              });
 
               const start = Date.now();
               let seenStale = false;
@@ -1881,10 +1917,7 @@ def inject_page_switch_cleaner() -> None:
                 const elapsed = Date.now() - start;
                 const switchDone = seenStale && !stale;
                 const neverStarted = !seenStale && elapsed > 3000;
-                if (switchDone || neverStarted || elapsed > 30000) {
-                  document.body.classList.remove(CLASS);
-                  stopWatcher();
-                }
+                if (switchDone || neverStarted || elapsed > 30000) endSwitch();
               }, 120);
             }, true);
           })();`;
@@ -3571,8 +3604,10 @@ section[data-testid="stSidebar"] div[role="radiogroup"][aria-label="Navigation"]
 
 /* While a page-switch rerun is in flight (class set by inject_page_switch_cleaner),
    hide the previous page's elements instead of leaving them stacked with the new
-   ones until the run completes. Streamlit marks them data-stale at run start. */
-body.bp-page-switching [data-stale="true"] {
+   ones until the run completes. Streamlit marks leaf elements data-stale at run
+   start; block chrome (expanders, tabs) is tagged bp-stale-block by the cleaner. */
+body.bp-page-switching [data-stale="true"],
+body.bp-page-switching .bp-stale-block {
     display: none !important;
 }
 
