@@ -1836,6 +1836,65 @@ def inject_main_scroll_restorer(page_key: str) -> None:
     )
 
 
+def inject_page_switch_cleaner() -> None:
+    """Hide the outgoing page's UI while a page-switch rerun is in flight.
+
+    Streamlit keeps the previous run's elements on screen until the new run
+    replaces them or finishes, so on slow page loads the old page stays
+    visible underneath the new one. The frontend marks those leftovers with
+    data-stale="true" as soon as the rerun starts; when the nav radio changes
+    we tag <body> so CSS can hide them, and untag once no stale elements
+    remain. Scoped to nav changes so ordinary in-page reruns keep the
+    default (stable, non-flickering) behaviour.
+    """
+    # The watcher must live in the parent window's JS realm: timers created
+    # from this component's iframe die when Streamlit recreates the iframe
+    # mid-rerun, which would leave the hiding class stuck on <body>.
+    html = """
+        <script>
+        (function() {
+          const doc = window.parent.document;
+          if (doc.getElementById("bp-page-switch-cleaner")) return;
+          const script = doc.createElement("script");
+          script.id = "bp-page-switch-cleaner";
+          script.textContent = `(function() {
+            const CLASS = "bp-page-switching";
+            let timer = null;
+
+            function stopWatcher() {
+              if (timer) { clearInterval(timer); timer = null; }
+            }
+
+            document.body.addEventListener("change", (ev) => {
+              const input = ev.target;
+              if (!input || !input.matches) return;
+              if (!input.matches('div[role="radiogroup"][aria-label="Navigation"] input[type="radio"]')) return;
+
+              document.body.classList.add(CLASS);
+              stopWatcher();
+
+              const start = Date.now();
+              let seenStale = false;
+              timer = setInterval(() => {
+                const stale = document.querySelector('[data-stale="true"]');
+                if (stale) seenStale = true;
+                const elapsed = Date.now() - start;
+                const switchDone = seenStale && !stale;
+                const neverStarted = !seenStale && elapsed > 3000;
+                if (switchDone || neverStarted || elapsed > 30000) {
+                  document.body.classList.remove(CLASS);
+                  stopWatcher();
+                }
+              }, 120);
+            }, true);
+          })();`;
+          doc.body.appendChild(script);
+        })();
+        </script>
+        """
+    components.html(html, height=0, width=0)
+
+
 def inject_sidebar_scroll_restorer(page_key: str) -> None:
     """Persist sidebar scroll position across Streamlit reruns."""
     fallback_page_key = page_key
@@ -3510,6 +3569,13 @@ section[data-testid="stSidebar"] div[role="radiogroup"][aria-label="Navigation"]
     font-weight: 800 !important;
 }
 
+/* While a page-switch rerun is in flight (class set by inject_page_switch_cleaner),
+   hide the previous page's elements instead of leaving them stacked with the new
+   ones until the run completes. Streamlit marks them data-stale at run start. */
+body.bp-page-switching [data-stale="true"] {
+    display: none !important;
+}
+
 .sidebar-divider {
     border: none;
     border-top: 1px solid rgba(24, 50, 47, 0.08);
@@ -4054,5 +4120,6 @@ with page_root.container():
     elif page == "Settings":
         page_settings()
 
+inject_page_switch_cleaner()
 inject_sidebar_scroll_restorer(page)
 inject_main_scroll_restorer(page)
