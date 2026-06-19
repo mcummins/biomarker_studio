@@ -2054,6 +2054,72 @@ def inject_sidebar_scroll_restorer(page_key: str) -> None:
     )
 
 
+def render_print_button() -> None:
+    """In-page "Print / Save as PDF" button (lives in each view's Share & archive
+    block). Clicking it flips a one-shot session flag and reruns IN-SESSION — no
+    page reload — so all sidebar state (page, category, time range) is preserved.
+    The rerun renders PRINT_MODE: charts rebuilt shorter (render_chart) and the
+    print layout applied. inject_print_runner() then handles the dialog."""
+    st.caption("Print this view (or save it as a PDF)")
+    if st.button("🖨️  Print / Save as PDF", key="print_button"):
+        st.session_state["_print_mode"] = True
+        # Bump a nonce so the runner iframe below reloads (and re-runs) on every
+        # print, not just the first.
+        st.session_state["_print_nonce"] = st.session_state.get("_print_nonce", 0) + 1
+        st.rerun()
+
+
+def inject_print_runner() -> None:
+    """Print-mode only: apply the print-width layout, open the print dialog, then
+    restore the normal view by clicking the hidden restore button — an in-session
+    rerun that (the print flag already popped) renders the normal app with ALL
+    session state intact.
+
+    Runs INSIDE the components iframe and reaches into window.parent — the same
+    technique as inject_sidebar_scroll_restorer (a parent <script> injection was
+    used before and silently failed). A nonce in the markup forces the iframe to
+    reload each print so this re-runs. ?noauto=1 skips the auto-dialog for tests.
+    """
+    nonce = st.session_state.get("_print_nonce", 0)
+    html = """
+        <script>
+        (function () {
+          var pwin = window.parent, pdoc = pwin.document;
+          function fireResize() { try { pwin.dispatchEvent(new pwin.Event('resize')); } catch (e) {} }
+
+          // Apply the print-width layout so container-width charts re-fit to the
+          // 680px canvas (their height is already reduced server-side).
+          try { pdoc.body.classList.add('biomarker-printing'); } catch (e) {}
+          var n = 0;
+          (function tick() { fireResize(); if (++n < 9) pwin.setTimeout(tick, 110); })();
+
+          function restore() {
+            try { pdoc.body.classList.remove('biomarker-printing'); } catch (e) {}
+            try {
+              var btns = [].slice.call(pdoc.querySelectorAll('button'));
+              var b = btns.filter(function (x) { return (x.textContent || '').indexOf('bmRestorePrint') >= 0; })[0];
+              if (b) { b.click(); }   // .click() fires React's handler even off-screen
+            } catch (e) {}
+          }
+
+          if (/[?&]noauto=1/.test(pwin.location.search)) return;   // test hook
+
+          pwin.setTimeout(function () {
+            pwin.print();
+            pwin.setTimeout(restore, 400);
+          }, 1100);
+        })();
+        /* print-nonce __NONCE__ */
+        </script>
+        """
+    # Sentinel + hidden button the runner clicks to rerun back to normal. The
+    # label avoids Markdown (e.g. __x__ renders bold and drops the underscores);
+    # the sentinel lets the global CSS keep the button off-screen at all times.
+    st.markdown('<span id="bm-restore-anchor"></span>', unsafe_allow_html=True)
+    st.button("bmRestorePrint", key="_bm_restore")
+    components.html(html.replace("__NONCE__", str(nonce)), height=0, width=0)
+
+
 def render_time_controls(scope: str, min_date: pd.Timestamp, max_date: pd.Timestamp) -> Tuple[pd.Timestamp, pd.Timestamp]:
     """Render shared time controls in the sidebar and return the active range."""
     preset_key = "global_time_preset"
@@ -2445,7 +2511,7 @@ def page_blood_panel():
                         background_view=background_view,
                         centiles=centiles_n,
                     )
-                    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+                    render_chart(fig, use_container_width=True, config={"displayModeBar": False})
     else:
         st.info("Use the sidebar to select tests to visualize.")
 
@@ -2457,17 +2523,21 @@ def page_blood_panel():
     )
     if len(tests_selected) >= 2:
         fig_hm = plot_heatmap(data, tests_selected[:30])  # limit to 30 for readability
-        st.plotly_chart(fig_hm, use_container_width=True)
+        render_chart(fig_hm, use_container_width=True)
     else:
         st.caption("Select 2 or more tests to see the heatmap.")
 
-    # Export
+    # Export / Share & archive (omitted from the printout itself).
+    if PRINT_MODE:
+        return
     render_section_header(
         "Export",
         "Take the current story with you as a static report or a filtered dataset.",
         "Share & archive",
     )
-    colA, colB = st.columns(2)
+    colP, colA, colB = st.columns(3)
+    with colP:
+        render_print_button()
     with colA:
         st.caption("Export selected charts to standalone HTML")
         if st.button("Export HTML"):
@@ -2650,17 +2720,24 @@ def page_dexa():
                         centiles=centiles_n,
                         centile_test=DEXA_CENTILE_TEST_MAP.get(test_name),
                     )
-                    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+                    render_chart(fig, use_container_width=True, config={"displayModeBar": False})
     else:
         st.info("Use the sidebar to select Dexa metrics to visualize.")
 
+    if PRINT_MODE:
+        return
     render_section_header(
         "Export",
-        "Download the current Dexa view as a filtered dataset.",
+        "Print this view, or download the current Dexa data as a filtered dataset.",
         "Share & archive",
     )
-    csv = data.sort_values(["category", "region", "metric", "Date"]).to_csv(index=False).encode("utf-8")
-    st.download_button("Download CSV", data=csv, file_name="dexa_data.csv", mime="text/csv")
+    colP, colB = st.columns(2)
+    with colP:
+        render_print_button()
+    with colB:
+        st.caption("Export current filtered dataset (CSV)")
+        csv = data.sort_values(["category", "region", "metric", "Date"]).to_csv(index=False).encode("utf-8")
+        st.download_button("Download CSV", data=csv, file_name="dexa_data.csv", mime="text/csv")
 
 
 def page_fitbit_data():
@@ -2839,7 +2916,7 @@ def page_fitbit_data():
                 trend_layout="inline",
             )
         fig_w = plot_fitbit_timeseries(weight_chart_df, "Weight", "Weight", "kg", color="#E07A5F", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None)
-        st.plotly_chart(fig_w, use_container_width=True, config={"displayModeBar": False})
+        render_chart(fig_w, use_container_width=True, config={"displayModeBar": False})
     else:
         st.info("No weight data available.")
 
@@ -2884,19 +2961,19 @@ def page_fitbit_data():
 
     if not hrv_df.empty:
         fig_hrv = plot_fitbit_timeseries(hrv_chart_df, "RMSSD", "HRV", "ms", color="#81B29A", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None, show_title=True)
-        st.plotly_chart(fig_hrv, use_container_width=True, config={"displayModeBar": False})
+        render_chart(fig_hrv, use_container_width=True, config={"displayModeBar": False})
     else:
         st.info("No HRV data available.")
 
     if not rhr_df.empty:
         fig_rhr = plot_fitbit_timeseries(rhr_chart_df, "RHR", "Resting HR", "bpm", color="#F2CC8F", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None, show_title=True)
-        st.plotly_chart(fig_rhr, use_container_width=True, config={"displayModeBar": False})
+        render_chart(fig_rhr, use_container_width=True, config={"displayModeBar": False})
     else:
         st.info("No resting heart rate data available.")
 
     if not br_df.empty:
         fig_br = plot_fitbit_timeseries(br_chart_df, "BreathingRate", "Breathing Rate", "brpm", color="#7EB8DA", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None, show_title=True)
-        st.plotly_chart(fig_br, use_container_width=True, config={"displayModeBar": False})
+        render_chart(fig_br, use_container_width=True, config={"displayModeBar": False})
     else:
         st.info("No breathing rate data available.")
 
@@ -2930,11 +3007,11 @@ def page_fitbit_data():
         st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True)
 
         fig_dur = plot_fitbit_timeseries(sleep_chart_df, "DurationHours", "Sleep Duration", "hours", color="#8E7CC3", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None, show_title=True)
-        st.plotly_chart(fig_dur, use_container_width=True, config={"displayModeBar": False})
+        render_chart(fig_dur, use_container_width=True, config={"displayModeBar": False})
 
         if "SleepScore" in sleep_df.columns and sleep_df["SleepScore"].notna().any():
             fig_score = plot_fitbit_timeseries(sleep_chart_df, "SleepScore", "Sleep Score", "score", color="#6AA84F", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None, show_title=True)
-            st.plotly_chart(fig_score, use_container_width=True, config={"displayModeBar": False})
+            render_chart(fig_score, use_container_width=True, config={"displayModeBar": False})
 
         stage_cols = {"Deep": "#3D85C6", "REM": "#E06666", "Light": "#F6B26B", "Wake": "#CC0000"}
         has_stages = any(sleep_df[col].notna().any() for col in stage_cols if col in sleep_df.columns)
@@ -2965,7 +3042,7 @@ def page_fitbit_data():
                 with (c1 if i % 2 == 0 else c2):
                     fig_stage = plot_fitbit_timeseries(sleep_chart_df, col, col, "min", color=color, show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None, show_title=True)
                     fig_stage.update_layout(height=300)
-                    st.plotly_chart(fig_stage, use_container_width=True, config={"displayModeBar": False})
+                    render_chart(fig_stage, use_container_width=True, config={"displayModeBar": False})
     else:
         st.info("No sleep data available.")
 
@@ -3019,17 +3096,17 @@ def page_fitbit_data():
         st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True)
 
         fig_steps = plot_fitbit_timeseries(activity_chart_df, "Steps", "Steps", "steps", color="#E07A5F", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None, show_title=True)
-        st.plotly_chart(fig_steps, use_container_width=True, config={"displayModeBar": False})
+        render_chart(fig_steps, use_container_width=True, config={"displayModeBar": False})
 
         if "ZoneMinutes" in activity_df.columns:
             fig_zm = plot_fitbit_timeseries(activity_chart_df, "ZoneMinutes", "Active Zone Minutes", "min", color="#81B29A", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None, show_title=True)
-            st.plotly_chart(fig_zm, use_container_width=True, config={"displayModeBar": False})
+            render_chart(fig_zm, use_container_width=True, config={"displayModeBar": False})
 
         fig_dist = plot_fitbit_timeseries(activity_chart_df, "Distance", "Distance", "km", color="#7EB8DA", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None, show_title=True)
-        st.plotly_chart(fig_dist, use_container_width=True, config={"displayModeBar": False})
+        render_chart(fig_dist, use_container_width=True, config={"displayModeBar": False})
 
         fig_cal = plot_fitbit_timeseries(activity_chart_df, "Calories", "Calories", "kcal", color="#F2CC8F", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None, show_title=True)
-        st.plotly_chart(fig_cal, use_container_width=True, config={"displayModeBar": False})
+        render_chart(fig_cal, use_container_width=True, config={"displayModeBar": False})
 
         zone_cols = {
             "MinutesFatBurn": ("#F6B26B", "Moderate"),
@@ -3073,7 +3150,7 @@ def page_fitbit_data():
                         show_title=True,
                     )
                     fig_zone.update_layout(height=300)
-                    st.plotly_chart(fig_zone, use_container_width=True, config={"displayModeBar": False})
+                    render_chart(fig_zone, use_container_width=True, config={"displayModeBar": False})
     else:
         st.info("No activity data available.")
 
@@ -3143,6 +3220,15 @@ def page_fitbit_data():
             st.rerun()
         if fetch_warnings:
             loading_placeholder.empty()
+
+    if PRINT_MODE:
+        return
+    render_section_header(
+        "Export",
+        "Print this view as a report or save it as a PDF.",
+        "Share & archive",
+    )
+    render_print_button()
 
 
 def page_lifts():
@@ -3306,7 +3392,16 @@ def page_lifts():
             standards_thresholds=standards_thresholds,
             strength_classification=strength_classification,
         )
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+        render_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+    if PRINT_MODE:
+        return
+    render_section_header(
+        "Export",
+        "Print this view as a report or save it as a PDF.",
+        "Share & archive",
+    )
+    render_print_button()
 
 
 def page_settings():
@@ -3459,6 +3554,33 @@ st.set_page_config(
     page_icon=str(Path(__file__).with_name("app_icon.png")),
     layout="wide",
 )
+
+# ---- Print mode ----
+# A separate, denser print layout, triggered by the in-page "Print" button in
+# each view's Share & archive block (render_print_button). The button sets a
+# one-shot session flag and reruns IN-SESSION (no page reload), so all sidebar
+# state — page, category, time range — is preserved. In print mode charts are
+# rebuilt shorter (render_chart) so several rows fit per printed page; the
+# normal on-screen app is unchanged. Popped here so the print render is one-shot
+# (the next rerun, triggered after the dialog, renders the normal view).
+PRINT_MODE = bool(st.session_state.pop("_print_mode", False))
+
+# Charts shrink to this fraction of their on-screen height in print mode. At
+# ~0.6, a 450px chart becomes ~270px, so three chart rows fit one portrait page.
+PRINT_CHART_SCALE = 0.6
+
+
+def render_chart(fig, **kwargs):
+    """st.plotly_chart, but shrinks tall charts when rendering for print."""
+    if PRINT_MODE:
+        try:
+            h = fig.layout.height
+            if h and h >= 200:        # leave sparklines/heatmap-cells alone
+                fig.update_layout(height=int(h * PRINT_CHART_SCALE))
+        except Exception:
+            pass
+    return st.plotly_chart(fig, **kwargs)
+
 
 # ---- Global CSS ----
 st.markdown("""
@@ -4093,6 +4215,280 @@ div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
         font-size: 2.3rem;
     }
 }
+
+/* The print runner's restore button must never be visible (the runner clicks it
+   to return to the normal view). Hide the sentinel's container and park the
+   button's container off-screen — off-screen, not display:none, so .click() and
+   textContent stay reliable. */
+[data-testid="element-container"]:has(#bm-restore-anchor) {
+    display: none !important;
+}
+[data-testid="element-container"]:has(#bm-restore-anchor) + [data-testid="element-container"] {
+    position: absolute !important;
+    left: -10000px !important;
+    top: 0 !important;
+    width: 1px !important;
+    height: 1px !important;
+    overflow: hidden !important;
+}
+
+/* ---- Print styles: hide chrome, lay out the main view for paper ---- */
+@media print {
+    /* Force background/panel colors to render on paper instead of being
+       stripped by the browser's ink-saving default. Also strip backdrop-filter
+       everywhere: Chrome's print-to-PDF can't rasterize it and leaves grey
+       boxes behind the cards/table (visible in Preview/Quick Look though the
+       on-screen print preview composites it fine). */
+    * {
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+        backdrop-filter: none !important;
+        -webkit-backdrop-filter: none !important;
+        box-shadow: none !important;   /* large soft shadows also halo in PDF */
+    }
+
+    /* Hide on-screen chrome and every interactive control. (.hero-nav-slot is
+       just an empty marker — Streamlit renders Prev/Next as sibling stButton
+       blocks — so the buttons are hidden directly. #biomarker-print-btn is the
+       floating Print button injected by inject_print_button.) */
+    section[data-testid="stSidebar"],
+    div[data-testid="stSidebar"],
+    div[data-testid="stSidebarCollapsedControl"],
+    div[data-testid="collapsedControl"],
+    button[data-testid="stSidebarCollapseButton"],
+    button[data-testid="baseButton-headerNoPadding"],
+    header[data-testid="stHeader"],
+    div[data-testid="stToolbar"],
+    div[data-testid="stStatusWidget"],
+    div[data-testid="stButton"],
+    div[data-testid="stDownloadButton"],
+    div[data-testid="stLinkButton"],
+    .stButton,
+    .hero-nav-slot,
+    #biomarker-print-btn {
+        display: none !important;
+    }
+
+    /* Flatten the heavy gradient backdrop to plain white for clean paper. */
+    html, body, .stApp,
+    section[data-testid="stMain"],
+    div[data-testid="stAppViewContainer"] {
+        background: #ffffff !important;
+    }
+
+    section[data-testid="stMain"],
+    div[data-testid="stAppViewContainer"] {
+        margin-left: 0 !important;
+        padding-left: 0 !important;
+        width: 100% !important;
+    }
+
+    /* Pin the content to a fixed page-width canvas (680px fits A4/Letter
+       portrait with the @page margin below) and KEEP the on-screen
+       multi-column layout. The Print button re-renders the charts to this
+       width first, so two/three charts sit across the page exactly like on
+       screen — no stacking, no clipping. */
+    .block-container {
+        width: 680px !important;
+        max-width: 680px !important;
+        margin: 0 auto !important;
+        padding: 0.5rem 0 1rem !important;
+        /* clip phantom Plotly overflow WITHOUT the scrollbar that overflow-x:
+           hidden induces (hidden forces overflow-y to auto). */
+        overflow-x: clip !important;
+    }
+
+    /* The on-screen scroll container must flow its content across printed pages
+       instead of clipping it to one viewport (and printing a scrollbar). */
+    section[data-testid="stMain"],
+    div[data-testid="stAppViewContainer"],
+    div[data-testid="stMainBlockContainer"] {
+        overflow: visible !important;
+    }
+
+    /* Streamlit wraps everything in flex containers, and Chrome won't honour
+       break-inside:avoid on flex items — so chart rows get sliced across page
+       breaks. Make the vertical stacking wrappers block so normal pagination
+       (and the break-inside rules below) apply. Horizontal blocks stay flex to
+       keep the columns side by side. */
+    div[data-testid="stVerticalBlock"],
+    div[data-testid="stVerticalBlockBorderWrapper"] {
+        display: block !important;
+    }
+
+    /* Tighten the inter-column gap so 3 charts comfortably fit 680px. */
+    div[data-testid="stHorizontalBlock"] {
+        gap: 0.5rem !important;
+    }
+
+    /* Drop the title background box entirely for print. The on-screen hero
+       (gradient + blurred orbs + shadow + border-radius/overflow:hidden) paints
+       its filled background SHIFTED off the title in Chrome's print-to-PDF when
+       it sits in an st.empty() placeholder (Blood Panel / Dexa) — a Chrome PDF
+       compositing quirk I couldn't reliably reproduce in isolation. With no
+       background box there is nothing to displace: the title prints as plain
+       bold text (always positioned correctly), aligned with the content below. */
+    .page-hero {
+        position: static !important;
+        overflow: visible !important;
+        border: none !important;
+        border-radius: 0 !important;
+        background: transparent !important;
+        box-shadow: none !important;
+        padding: 0.25rem 0 0.5rem !important;
+        margin-bottom: 0.6rem !important;
+    }
+    .hero-orb {
+        display: none !important;
+    }
+
+    div[data-testid="stFullScreenFrame"],
+    .stPlotlyChart,
+    .js-plotly-plot,
+    .plot-container,
+    div[data-testid="stVegaLiteChart"],
+    div[data-testid="stDataFrame"],
+    div[data-testid="stTable"] {
+        max-width: 100% !important;
+    }
+
+    .stat-grid {
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)) !important;
+        width: 100% !important;
+    }
+
+    /* st.metric cards default to a big nowrap value that gets clipped to an
+       ellipsis ("02 Apr…") in the narrower print columns. Shrink it a touch and
+       let both label and value wrap so the full text shows. */
+    div[data-testid="stMetricValue"] {
+        font-size: 1.35rem !important;
+        white-space: normal !important;
+        overflow: visible !important;
+        text-overflow: clip !important;
+    }
+    div[data-testid="stMetricValue"] > div {
+        white-space: normal !important;
+        overflow: visible !important;
+        text-overflow: clip !important;
+    }
+    div[data-testid="stMetricLabel"],
+    div[data-testid="stMetricLabel"] * {
+        white-space: normal !important;
+        overflow: visible !important;
+        text-overflow: clip !important;
+    }
+
+    /* Keep a chart row / card whole rather than splitting it across pages. */
+    div[data-testid="stHorizontalBlock"],
+    div[data-testid="stColumn"],
+    div[data-testid="column"],
+    div[data-testid="stFullScreenFrame"],
+    .stPlotlyChart,
+    .js-plotly-plot,
+    .page-hero,
+    .metric-card,
+    .stat-card,
+    .context-chip-row,
+    .dexa-summary-subsection,
+    div[data-testid="stVegaLiteChart"],
+    div[data-testid="stTable"],
+    div[data-testid="stDataFrame"],
+    div[data-testid="stMetric"] {
+        break-inside: avoid;
+        page-break-inside: avoid;
+    }
+
+    /* Plotly draws its own toolbar on hover; never let it print. */
+    .modebar-container {
+        display: none !important;
+    }
+}
+
+/* Page margins for the printout. 12mm leaves a printable width of ~703px (A4)
+   / ~726px (Letter), which the 680px canvas above sits comfortably inside. */
+@page {
+    margin: 12mm;
+}
+
+/* "Print prep" — the Print button switches this class on (on the live page)
+   BEFORE opening the print dialog. It reflows the page to the same fixed
+   canvas so Streamlit's container-width Plotly charts redraw to the print
+   width while still on screen, where the redraw reliably completes. The
+   @media print rules above then carry that exact layout onto paper. */
+body.biomarker-printing section[data-testid="stSidebar"],
+body.biomarker-printing div[data-testid="stSidebarCollapsedControl"],
+body.biomarker-printing div[data-testid="collapsedControl"],
+body.biomarker-printing button[data-testid="baseButton-headerNoPadding"],
+body.biomarker-printing header[data-testid="stHeader"],
+body.biomarker-printing div[data-testid="stButton"],
+body.biomarker-printing div[data-testid="stDownloadButton"],
+body.biomarker-printing div[data-testid="stLinkButton"],
+body.biomarker-printing .stButton,
+body.biomarker-printing .hero-nav-slot,
+body.biomarker-printing #biomarker-print-btn {
+    display: none !important;
+}
+/* Strip backdrop-filter (and soft shadows) in print prep too — they rasterize
+   to grey boxes/halos in the saved PDF (see the @media print note). */
+body.biomarker-printing * {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    box-shadow: none !important;
+}
+body.biomarker-printing .block-container {
+    width: 680px !important;
+    max-width: 680px !important;
+    margin: 0 auto !important;
+    /* Zero the ~80px Streamlit side padding so the columns get the full 680px
+       — must match the @media print rule, or the charts redraw to the wrong
+       width during prep and keep it when printed. */
+    padding: 0.5rem 0 1rem !important;
+    overflow-x: clip !important;
+}
+body.biomarker-printing .page-hero {
+    position: static !important;
+    overflow: visible !important;
+    border-radius: 0 !important;
+    border: none !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    padding: 0.25rem 0 0.5rem !important;
+    margin-bottom: 0.6rem !important;
+}
+body.biomarker-printing .hero-orb {
+    display: none !important;
+}
+body.biomarker-printing div[data-testid="stVerticalBlock"],
+body.biomarker-printing div[data-testid="stVerticalBlockBorderWrapper"] {
+    display: block !important;
+}
+body.biomarker-printing div[data-testid="stHorizontalBlock"] {
+    gap: 0.5rem !important;
+}
+body.biomarker-printing div[data-testid="stFullScreenFrame"],
+body.biomarker-printing .stPlotlyChart,
+body.biomarker-printing .js-plotly-plot,
+body.biomarker-printing .plot-container,
+body.biomarker-printing div[data-testid="stDataFrame"] {
+    max-width: 100% !important;
+}
+body.biomarker-printing .stat-grid {
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)) !important;
+    width: 100% !important;
+}
+body.biomarker-printing div[data-testid="stMetricValue"] {
+    font-size: 1.35rem !important;
+    white-space: normal !important;
+    overflow: visible !important;
+    text-overflow: clip !important;
+}
+body.biomarker-printing div[data-testid="stMetricValue"] > div,
+body.biomarker-printing div[data-testid="stMetricLabel"],
+body.biomarker-printing div[data-testid="stMetricLabel"] * {
+    white-space: normal !important;
+    overflow: visible !important;
+    text-overflow: clip !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -4158,3 +4554,13 @@ with page_root.container():
 inject_page_switch_cleaner()
 inject_sidebar_scroll_restorer(page)
 inject_main_scroll_restorer(page)
+if PRINT_MODE:
+    inject_print_runner()
+else:
+    # Safety net: clear any lingering print-layout class so the normal view is
+    # never stuck with the sidebar hidden / 680px canvas.
+    components.html(
+        "<script>try{window.parent.document.body.classList.remove('biomarker-printing');}catch(e){}</script>",
+        height=0,
+        width=0,
+    )
