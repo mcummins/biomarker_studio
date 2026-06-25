@@ -52,6 +52,97 @@ CENTILE_COLUMNS = [
     ("bottom_1", 0.00, "Bottom 1%"),
 ]
 CENTILE_METRICS_CATEGORY = "Centile metrics"
+
+# -----------------------------
+# US-typical unit conversions
+# -----------------------------
+# Maps a biomarker (matched on its lower-cased name, the same test_key used
+# elsewhere) to its US-customary unit and the affine transform that takes the
+# SI/metric value stored in the sheet to that unit:  us = si * factor + offset.
+# The All Data, Optimal Ranges and Centiles tabs all store a given marker in the
+# same SI unit, so the same transform is applied to measurements, reference
+# bounds and centile boundaries alike — keeping derived status, z-scores and
+# centile shading unchanged in meaning (all are invariant under a positive
+# affine transform). Markers already reported in US-typical units (mg/dL
+# apolipoproteins, ng/dL T3, mcg/dL DHEA-S/T4, ng/mL C-peptide/GH, mg/L hs-CRP,
+# nmol/L SHBG/Lp(a), …) and assay-specific titres without a standard conversion
+# are intentionally omitted and left untouched.
+US_UNIT_CONVERSIONS = {
+    # Glucose (mmol/L -> mg/dL)
+    "fasting glucose": {"unit": "mg/dL", "factor": 18.0182},
+    # HbA1c (IFCC mmol/mol -> NGSP/DCCT %) — affine, NGSP master equation
+    "hba1c": {"unit": "%", "factor": 0.09148, "offset": 2.152},
+    # Insulin (pmol/L -> μIU/mL)
+    "fasting insulin": {"unit": "μIU/mL", "factor": 0.14399},
+    # Cholesterol family (mmol/L -> mg/dL)
+    "total cholesterol": {"unit": "mg/dL", "factor": 38.67},
+    "hdl cholesterol": {"unit": "mg/dL", "factor": 38.67},
+    "ldl cholesterol": {"unit": "mg/dL", "factor": 38.67},
+    "vldl cholesterol": {"unit": "mg/dL", "factor": 38.67},
+    "non-hdl cholesterol": {"unit": "mg/dL", "factor": 38.67},
+    "direct ldl": {"unit": "mg/dL", "factor": 38.67},
+    # Triglycerides (mmol/L -> mg/dL)
+    "triglycerides": {"unit": "mg/dL", "factor": 88.57},
+    # Renal / nitrogen
+    "creatinine": {"unit": "mg/dL", "factor": 0.011312},     # umol/L -> mg/dL
+    "bun": {"unit": "mg/dL", "factor": 2.801},               # mmol/L -> mg/dL (as N)
+    "urea": {"unit": "mg/dL", "factor": 6.006},              # mmol/L -> mg/dL (urea molecule)
+    "uric acid": {"unit": "mg/dL", "factor": 0.016812},      # umol/L -> mg/dL
+    "urate": {"unit": "mg/dL", "factor": 0.016812},
+    # Bilirubin (umol/L -> mg/dL)
+    "total bilirubin": {"unit": "mg/dL", "factor": 0.058467},
+    "direct bilirubin": {"unit": "mg/dL", "factor": 0.058467},
+    "indirect bilirubin": {"unit": "mg/dL", "factor": 0.058467},
+    # Minerals (mmol/L -> mg/dL)
+    "calcium": {"unit": "mg/dL", "factor": 4.008},
+    "magnesium": {"unit": "mg/dL", "factor": 2.4305},
+    "phosphate": {"unit": "mg/dL", "factor": 3.0974},
+    # Iron studies (umol/L -> μg/dL)
+    "iron": {"unit": "μg/dL", "factor": 5.587},
+    "total iron binding capacity (tibc)": {"unit": "μg/dL", "factor": 5.587},
+    # Vitamins
+    "vitamin d": {"unit": "ng/mL", "factor": 0.40064},       # nmol/L -> ng/mL
+    "vitamin b12": {"unit": "pg/mL", "factor": 1.0},         # ng/L  -> pg/mL (identical)
+    "folate (vitamin b9)": {"unit": "ng/mL", "factor": 1.0}, # ug/L  -> ng/mL (identical)
+    # Hormones
+    "total testosterone": {"unit": "ng/dL", "factor": 28.842},          # nmol/L -> ng/dL
+    "free testosterone": {"unit": "pg/mL", "factor": 288.42},           # nmol/L -> pg/mL
+    "oestradiol": {"unit": "pg/mL", "factor": 0.27240},                 # pmol/L -> pg/mL
+    "free t4": {"unit": "ng/dL", "factor": 0.07769},                    # pmol/L -> ng/dL
+    "free tri-iodothyronine (ft3)": {"unit": "pg/mL", "factor": 0.6510},# pmol/L -> pg/mL
+    "parathyroid hormone (pth)": {"unit": "pg/mL", "factor": 9.434},    # pmol/L -> pg/mL
+    "prolactin": {"unit": "ng/mL", "factor": 0.04717},                  # mIU/L  -> ng/mL
+    # Proteins reported in g/dL in the US (g/L -> g/dL)
+    "albumin": {"unit": "g/dL", "factor": 0.1},
+    "total protein": {"unit": "g/dL", "factor": 0.1},
+    "haemoglobin": {"unit": "g/dL", "factor": 0.1},
+    "calculated globulin": {"unit": "g/dL", "factor": 0.1},
+    # Proteins reported in mg/dL in the US (g/L -> mg/dL)
+    "immunoglobulin a (iga)": {"unit": "mg/dL", "factor": 100.0},
+    "immunoglobulin g (igg)": {"unit": "mg/dL", "factor": 100.0},
+    "immunoglobulin m (igm)": {"unit": "mg/dL", "factor": 100.0},
+    "complement component 3 (c3)": {"unit": "mg/dL", "factor": 100.0},
+    "complement component 4 (c4)": {"unit": "mg/dL", "factor": 100.0},
+    "transferrin": {"unit": "mg/dL", "factor": 100.0},
+    # Haematocrit (ratio -> %)
+    "haematocrit": {"unit": "%", "factor": 100.0},
+    # Markers reported in ng/mL in the US (numerically identical to ug/L / μg/l)
+    "ferritin": {"unit": "ng/mL", "factor": 1.0},
+    "leptin": {"unit": "ng/mL", "factor": 1.0},
+    "total prostate specific antigen (tpsa)": {"unit": "ng/mL", "factor": 1.0},
+    # Albumin/Creatinine ratio (mg/mmol -> mg/g creatinine)
+    "microalbumin / creatinine ratio": {"unit": "mg/g creatinine", "factor": 8.8402},
+    # Monovalent electrolytes (mmol/L -> mEq/L, numerically identical)
+    "sodium": {"unit": "mEq/L", "factor": 1.0},
+    "potassium": {"unit": "mEq/L", "factor": 1.0},
+    "chloride": {"unit": "mEq/L", "factor": 1.0},
+    "bicarbonate": {"unit": "mEq/L", "factor": 1.0},
+    # Thyroid / pituitary titres (numerically identical relabels)
+    "tsh": {"unit": "μIU/mL", "factor": 1.0},                          # mIU/L -> μIU/mL
+    "follicle stimulating hormone": {"unit": "mIU/mL", "factor": 1.0}, # IU/L  -> mIU/mL
+    "luteinising hormone": {"unit": "mIU/mL", "factor": 1.0},
+}
+
 # Warm-theme gradient anchors for centile shading: 0 = worst centile, 1 = best.
 CENTILE_GRADIENT = [
     (0.00, "#E07A5F"),
@@ -442,6 +533,51 @@ def attach_lab_notes(long: pd.DataFrame, notes: pd.DataFrame) -> pd.DataFrame:
         return long.merge(df, on="Date", how="left")
     return long
 
+
+def convert_units_to_us(
+    merged: pd.DataFrame,
+    centiles: Optional[pd.DataFrame] = None,
+) -> Tuple[pd.DataFrame, Optional[pd.DataFrame]]:
+    """Re-express measurements, reference bounds and centiles in US-typical units.
+
+    For every biomarker listed in ``US_UNIT_CONVERSIONS`` the stored SI value is
+    mapped through ``us = si * factor + offset`` and the unit label is replaced.
+    The identical transform is applied to the measurement columns, the optimal
+    range bounds and each centile boundary, so status, z-scores and centile
+    shading (all invariant under a positive affine transform) are unchanged.
+    Markers not in the mapping are passed through untouched.
+    """
+    merged = merged.copy()
+    keys = merged["test"].astype(str).str.strip().str.lower()
+    value_cols = [c for c in ("Value", "lower", "upper", "borderline") if c in merged.columns]
+    for key, conv in US_UNIT_CONVERSIONS.items():
+        mask = keys == key
+        if not mask.any():
+            continue
+        factor = conv["factor"]
+        offset = conv.get("offset", 0.0)
+        for col in value_cols:
+            merged.loc[mask, col] = merged.loc[mask, col] * factor + offset
+        if "unit" in merged.columns:
+            merged.loc[mask, "unit"] = conv["unit"]
+
+    if centiles is not None and not centiles.empty and "test_key" in centiles.columns:
+        centiles = centiles.copy()
+        centile_value_cols = [col for col, _score, _label in CENTILE_COLUMNS if col in centiles.columns]
+        for key, conv in US_UNIT_CONVERSIONS.items():
+            mask = centiles["test_key"] == key
+            if not mask.any():
+                continue
+            factor = conv["factor"]
+            offset = conv.get("offset", 0.0)
+            for col in centile_value_cols:
+                centiles.loc[mask, col] = centiles.loc[mask, col] * factor + offset
+            if "unit" in centiles.columns:
+                centiles.loc[mask, "unit"] = conv["unit"]
+
+    return merged, centiles
+
+
 def status_from_bounds(value, lower, upper) -> str:
     if pd.notna(lower) and value < lower:
         return "low"
@@ -720,8 +856,27 @@ def get_centile_metric_names(centiles: Optional[pd.DataFrame], available_tests: 
     return names
 
 
+def render_us_units_toggle(scope: str) -> bool:
+    """Sidebar toggle that switches the page into US-typical units.
+
+    Uses the same shadow-key pattern as the biohacker controls so the choice
+    survives page switches, and is read early in the page (before the widget is
+    rendered) via ``st.session_state.get(f"{scope}_us_units_on", False)``.
+    """
+    persist_key = f"{scope}_us_units_on"
+    us_units = st.sidebar.toggle(
+        "US units",
+        value=st.session_state.get(persist_key, False),
+        key=f"{scope}_us_units",
+        help="Display values in US-customary units (mg/dL, %, μIU/mL, …) instead of SI/metric units.",
+    )
+    st.session_state[persist_key] = us_units
+    return us_units
+
+
 def render_background_view_controls(scope: str) -> str:
     st.sidebar.markdown('<hr class="sidebar-divider">', unsafe_allow_html=True)
+    render_us_units_toggle(scope)
     # Shadow key keeps the choice alive across page switches, since Streamlit
     # drops widget state for pages that don't render the widget.
     persist_key = f"{scope}_biohacker_on"
@@ -2291,6 +2446,20 @@ def page_blood_panel():
     merged = attach_ranges(long, ranges_n)
     if isinstance(notes, pd.DataFrame):
         merged = attach_lab_notes(merged, notes)
+
+    # US units: convert before status/z so all downstream views (charts, delta
+    # table, heatmap, CSV) inherit the converted values and unit labels. The
+    # toggle widget renders later (render_background_view_controls), so we read
+    # its state here from session_state. Prefer the live widget key — Streamlit
+    # restores it to the user's latest choice at the start of each rerun, so the
+    # toggle takes effect immediately — and fall back to the shadow key, which
+    # survives page switches when the widget key is dropped.
+    us_units_on = st.session_state.get(
+        "blood_panel_us_units",
+        st.session_state.get("blood_panel_us_units_on", False),
+    )
+    if us_units_on:
+        merged, centiles_n = convert_units_to_us(merged, centiles_n)
 
     # Status & z-scores
     merged["status"] = merged.apply(lambda r: status_from_bounds(r["Value"], r.get("lower"), r.get("upper")), axis=1)
