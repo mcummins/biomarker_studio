@@ -504,6 +504,16 @@ def _activity_records_to_df(records: List[Dict]) -> pd.DataFrame:
     df = df.rename(columns={
         "steps": "Steps", "calories": "Calories", "distance": "Distance",
         "activeMinutes": "ActiveMinutes", "zoneMinutes": "ZoneMinutes",
+        # Fitbit-era columns (no Google equivalent, always empty). The
+        # capitalized names must exist: app.py's schema-upgrade check forces
+        # a resync loop when MinutesFatBurn/Cardio/Peak are missing.
+        "minutesFairlyActive": "MinutesFairlyActive",
+        "minutesVeryActive": "MinutesVeryActive",
+        "minutesSedentary": "MinutesSedentary",
+        "minutesLightlyActive": "MinutesLightlyActive",
+        "minutesFatBurn": "MinutesFatBurn",
+        "minutesCardio": "MinutesCardio",
+        "minutesPeak": "MinutesPeak",
     })
     df = df.drop(columns=["date"], errors="ignore")
     return df.sort_values("Date").reset_index(drop=True)
