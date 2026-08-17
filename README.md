@@ -43,6 +43,26 @@ streamlit run app.py
 
 If you prefer to avoid Google APIs entirely, export the workbook as `.xlsx` and use the **Upload Excel** option.
 
+## 4b) Wearable & scale data sources (2026 migration)
+
+The Fitbit Web API sunsets in September 2026, and the Garmin scale stopped
+reaching it in July 2026, so device data now comes from three places:
+
+- **Weight** — `garmin_client.py` pulls weigh-ins from Garmin Connect
+  (`.garmin_cache/`). One-time login: `.venv/bin/python garmin_login.py`.
+  The app merges this with the frozen Fitbit weight history, which includes
+  manually logged Fitbit entries (Garmin wins on shared dates).
+- **Activity / sleep / HRV / RHR / breathing rate** — migrating from
+  `fitbit_client.py` to `google_health_client.py` (Google Health API v4).
+  One-time setup: create an OAuth client per the docstring in
+  `google_health_login.py`, then run it. Before the app switches over, run
+  `compare_fitbit_google.py` to diff both APIs day-by-day
+  (report: `archive/fitbit_vs_google_report.md`).
+- **Frozen archive** — `archive/fitbit_cache_2026-08-17/` is a complete
+  snapshot of everything the Fitbit Web API ever returned (through the
+  sunset). Do not delete; it is the only copy of pre-Garmin weight and any
+  fields Google Health does not carry forward.
+
 ## 5) Notes
 
 - The app infers date columns dynamically and handles common result formats like `"<9.00"`, `">130"`, and `4-9` ranges.

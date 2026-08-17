@@ -18,6 +18,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 
 import fitbit_client
+import garmin_client
 import hevy_client
 import strength_standards
 
@@ -1644,7 +1645,7 @@ def compute_lift_trend_per_month(df: pd.DataFrame, value_col: str) -> Optional[f
 
 def get_latest_fitbit_weight_kg() -> Optional[float]:
     try:
-        weight_df = fitbit_client.load_cached_dataframe("weight")
+        weight_df = garmin_client.load_merged_weight()
     except Exception:
         return None
 
@@ -2944,16 +2945,48 @@ def page_fitbit_data():
         func_name: fitbit_client.load_cached_dataframe(metric_name)
         for _, func_name, metric_name in fetch_steps
     }
+    # Weight now merges the frozen Fitbit history (incl. manually logged
+    # entries) with live Garmin scale data; Garmin wins on shared dates.
+    results["fetch_weight"] = garmin_client.load_merged_weight()
+
+    def _weight_cache_fresh() -> bool:
+        if garmin_client.is_configured():
+            return garmin_client.is_cache_fresh()
+        return fitbit_client.is_cache_fresh("weight")
+
     has_any_cache = any(not df.empty for df in results.values())
     stale_labels = [
         label for label, _, metric_name in fetch_steps
-        if not fitbit_client.is_cache_fresh(metric_name)
+        if not (
+            _weight_cache_fresh() if metric_name == "weight"
+            else fitbit_client.is_cache_fresh(metric_name)
+        )
     ]
     auto_refresh = sync_mode is None and has_any_cache and len(stale_labels) > 0
     if sync_mode is None and not has_any_cache:
         sync_mode = "incremental"
 
+    def fetch_weight_all_sources(force_full: bool):
+        """Refresh weight. Garmin is the live source once configured; the
+        Fitbit weight API stopped receiving scale data on 2026-07-22, so it
+        is only fetched while Garmin is not yet set up."""
+        warnings = []
+        if garmin_client.is_configured():
+            try:
+                garmin_client.fetch_weight(force_full=force_full)
+            except Exception as e:
+                warnings.append(f"Weight (Garmin): live sync failed, showing cached data ({e})")
+        else:
+            try:
+                fitbit_client.fetch_weight(force_full=force_full)
+            except Exception as e:
+                warnings.append(f"Weight (Fitbit): live sync failed, showing cached data ({e})")
+        merged = garmin_client.load_merged_weight()
+        return merged, ("; ".join(warnings) or None)
+
     def fetch_fitbit_metric(label: str, func_name: str, metric_name: str, force_full: bool):
+        if metric_name == "weight":
+            return fetch_weight_all_sources(force_full)
         try:
             data = getattr(fitbit_client, func_name)(force_full=force_full)
             return data, None
@@ -3460,7 +3493,7 @@ def page_lifts():
     current_bodyweight_kg = get_latest_fitbit_weight_kg()
     if strength_standards.has_data() and current_bodyweight_kg is not None:
         st.caption(
-            f"Strength standards use your latest cached Fitbit weight "
+            f"Strength standards use your latest cached weigh-in "
             f"({format_fitbit_metric_value(current_bodyweight_kg, 'kg', 1)}) and male thresholds."
         )
 
@@ -3618,6 +3651,46 @@ def page_settings():
         if st.button("Clear Hevy cache"):
             hevy_client.clear_cache()
             st.success("Hevy cache cleared.")
+
+    # Garmin (weight source since the scale stopped reaching the Fitbit API)
+    render_section_header(
+        "Garmin",
+        "Weigh-ins from the Garmin scale. Garmin Connect is the live weight source; "
+        "the Fitbit weight history (including manual entries) is kept and merged in.",
+        "Sources",
+    )
+    if garmin_client.is_configured():
+        st.success("Connected to Garmin Connect")
+        garmin_weight_df = garmin_client.load_cached_dataframe()
+        if not garmin_weight_df.empty:
+            last_garmin = pd.to_datetime(garmin_weight_df["Date"]).max()
+            st.caption(
+                f"{len(garmin_weight_df)} cached weigh-ins, latest "
+                f"{format_display_date(last_garmin)}"
+            )
+        garmin_col1, garmin_col2 = st.columns(2)
+        with garmin_col1:
+            if st.button("Sync Garmin weight now"):
+                try:
+                    with st.spinner("Fetching Garmin weigh-ins..."):
+                        garmin_df = garmin_client.fetch_weight()
+                    st.success(f"Garmin weight synced ({len(garmin_df)} weigh-ins).")
+                except Exception as e:
+                    st.error(f"Garmin sync failed: {e}")
+        with garmin_col2:
+            if st.button("Full Garmin re-pull"):
+                try:
+                    with st.spinner("Re-fetching full Garmin weight history..."):
+                        garmin_df = garmin_client.fetch_weight(force_full=True)
+                    st.success(f"Garmin history re-pulled ({len(garmin_df)} weigh-ins).")
+                except Exception as e:
+                    st.error(f"Garmin full re-pull failed: {e}")
+    else:
+        st.info(
+            "Not connected. Run this once in a terminal, then reload this page "
+            "(your password stays in the terminal, it is never stored):"
+        )
+        st.code('.venv/bin/python garmin_login.py', language="bash")
 
     # Status
     render_section_header("Connection Status", "A quick health check of your local Fitbit connection and token state.", "Setup")

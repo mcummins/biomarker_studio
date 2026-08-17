@@ -9,10 +9,18 @@ __pycache__/
 # Secrets & credentials
 fitbit_config.json
 sheet_api_key.json
+google_health_config.json
+.garmin_tokens/
 
-# Fitbit cached data
+# Cached wearable data
 .fitbit_cache/
 .hevy_cache/
+.garmin_cache/
+.google_health_cache/
+
+# Frozen Fitbit API snapshot + parity reports (personal health data;
+# lives in Dropbox, keep out of the GitHub-connected repo)
+archive/
 
 # IDE / editor
 .claude/

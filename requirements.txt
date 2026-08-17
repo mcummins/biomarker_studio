@@ -8,3 +8,4 @@ protobuf<5
 python-dateutil>=2.9
 PyYAML>=6.0.1
 requests>=2.31
+garminconnect>=0.3
