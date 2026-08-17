@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-APP_DIR="/Users/mcummins/Library/CloudStorage/Dropbox/Health/z blood_panel_explorer"
+APP_DIR="/Users/mcummins/Library/CloudStorage/Dropbox/coding_projects/biomarker_studio"
 PYTHON_BIN="$APP_DIR/.venv/bin/python3"
 APP_FILE="$APP_DIR/app.py"
 URL="http://localhost:8501"

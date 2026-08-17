@@ -217,6 +217,26 @@ def _civil_date(obj: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+_NON_TYPE_KEYS = {"dataPointName", "dataSource", "id", "name", "startTime",
+                  "endTime", "sampleTime", "civilStartTime", "civilEndTime"}
+
+
+def _daily_body(point: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the inner payload of a Daily-kind dataPoint. The API nests
+    everything under the camelCase type key, e.g.
+    {"dailyRestingHeartRate": {"date": {...}, "beatsPerMinute": "55"}}."""
+    for key, value in point.items():
+        if key not in _NON_TYPE_KEYS and isinstance(value, dict):
+            return value
+    return point
+
+
+def _date_struct_to_str(d: Dict[str, Any]) -> Optional[str]:
+    if not isinstance(d, dict) or not d.get("year"):
+        return None
+    return f"{d['year']:04d}-{d.get('month', 1):02d}-{d.get('day', 1):02d}"
+
+
 def _first_number(obj: Any, skip_keys=("year", "month", "day", "hours", "minutes",
                                        "seconds", "nanos")) -> Optional[float]:
     """Depth-first search for the first numeric leaf in a payload value."""
@@ -326,18 +346,19 @@ def _windows(start: date, end: date, days: int):
         window_start = window_end + timedelta(days=1)
 
 
-# Candidate filter shapes per data-type kind. Google documents
-# `steps.interval.civil_start_time` (Interval) and
-# `body_fat.sample_time.physical_time` (Sample); the Daily/Session shapes are
-# probed at runtime and the first accepted template is remembered per type.
+# Candidate filter shapes per data-type kind. Verified against the live API:
+# Daily types accept `{type}.date >= "YYYY-MM-DD"`; Interval types document
+# `{type}.interval.civil_start_time`; Sample types document
+# `{type}.sample_time.physical_time`. The first accepted template is
+# remembered per type. (Session types like sleep accept none of these —
+# they are fetched unfiltered, newest-first, with early stop.)
 _FILTER_TEMPLATES = [
+    # Daily kinds: `.date` supports only >= and < comparators.
+    '{t}.date >= "{s}" AND {t}.date < "{e_excl}"',
     '{t}.interval.civil_start_time >= "{s}T00:00:00" AND '
     '{t}.interval.civil_start_time <= "{e}T23:59:59"',
-    '{t}.civil_date >= "{s}" AND {t}.civil_date <= "{e}"',
     '{t}.sample_time.physical_time >= "{s}T00:00:00Z" AND '
     '{t}.sample_time.physical_time <= "{e}T23:59:59Z"',
-    '{t}.session.civil_start_time >= "{s}T00:00:00" AND '
-    '{t}.session.civil_start_time <= "{e}T23:59:59"',
 ]
 
 _FILTER_CHOICE_PATH = os.path.join(CACHE_DIR, "filter_templates.json")
@@ -369,7 +390,8 @@ def _list_points_for_range(data_type: str, snake: str, start: date,
     last_error: Optional[Exception] = None
     for idx in order:
         expr = _FILTER_TEMPLATES[idx].format(
-            t=snake, s=start.isoformat(), e=end.isoformat()
+            t=snake, s=start.isoformat(), e=end.isoformat(),
+            e_excl=(end + timedelta(days=1)).isoformat(),
         )
         try:
             points = _list_data_points(data_type, expr)
@@ -443,6 +465,8 @@ def fetch_activity(start_date: Optional[str] = None, force_full: bool = False,
     calories = _rollup_series("total-calories", fetch_start, today, progress_cb, (0.5, 0.8))
     active_min = _rollup_series("active-minutes", fetch_start, today, progress_cb, (0.8, 0.9))
     azm = _rollup_series("active-zone-minutes", fetch_start, today, progress_cb, (0.9, 1.0))
+    # Google reports distance in millimetres; the Fitbit series is km.
+    distance = {d: round(v / 1e6, 6) for d, v in distance.items()}
 
     all_dates = sorted(set(steps) | set(distance) | set(calories) | set(active_min) | set(azm))
     new_records = []
@@ -506,10 +530,9 @@ def fetch_rhr(start_date: Optional[str] = None, force_full: bool = False,
             "daily-resting-heart-rate", "daily_resting_heart_rate", w_start, w_end
         )
         for point in points:
-            d = _civil_date(point)
-            val = _extract_metric_value(point, [
-                "dailyRestingHeartRate", "restingHeartRate", "value", "bpm",
-            ])
+            body = _daily_body(point)
+            d = _date_struct_to_str(body.get("date")) or _civil_date(point)
+            val = _first_number(body.get("beatsPerMinute"))
             if d and val is not None:
                 new_records.append({"date": d, "rhr": val})
     all_records = _merge_and_save(metric, cached, new_records)
@@ -539,10 +562,9 @@ def fetch_hrv(start_date: Optional[str] = None, force_full: bool = False,
             "daily-heart-rate-variability", "daily_heart_rate_variability", w_start, w_end
         )
         for point in points:
-            d = _civil_date(point)
-            val = _extract_metric_value(point, [
-                "dailyHeartRateVariability", "rmssd", "dailyRmssd", "value",
-            ])
+            body = _daily_body(point)
+            d = _date_struct_to_str(body.get("date")) or _civil_date(point)
+            val = _first_number(body.get("averageHeartRateVariabilityMilliseconds"))
             if d and val is not None:
                 new_records.append({"date": d, "rmssd": val,
                                     "coverage": None, "hf": None, "lf": None})
@@ -584,10 +606,9 @@ def fetch_breathing_rate(start_date: Optional[str] = None, force_full: bool = Fa
             "daily-respiratory-rate", "daily_respiratory_rate", w_start, w_end
         )
         for point in points:
-            d = _civil_date(point)
-            val = _extract_metric_value(point, [
-                "dailyRespiratoryRate", "respiratoryRate", "breathingRate", "value",
-            ])
+            body = _daily_body(point)
+            d = _date_struct_to_str(body.get("date")) or _civil_date(point)
+            val = _first_number(body.get("breathsPerMinute"))
             if d and val is not None:
                 new_records.append({"date": d, "breathing_rate": val})
     all_records = _merge_and_save(metric, cached, new_records)
@@ -653,75 +674,125 @@ def fetch_sleep(start_date: Optional[str] = None, force_full: bool = False,
     if fetch_start > today:
         return _sleep_records_to_df(cached)
 
+    # Sleep sessions accept no filter expression: page newest-first and stop
+    # once a page is entirely older than fetch_start.
     new_records = []
-    spans = list(_windows(fetch_start, today, 90))
+    path = "/users/me/dataTypes/sleep/dataPoints:reconcile"
+    params: Dict[str, Any] = {}
+    pages = 0
     saved_sample = os.path.exists(os.path.join(CACHE_DIR, "sleep_raw_sample.json"))
-    for i, (w_start, w_end) in enumerate(spans):
-        if progress_cb:
-            progress_cb(i / max(len(spans), 1))
-        sessions = _list_points_for_range("sleep", "sleep", w_start, w_end)
-        for session in sessions:
-            if not saved_sample:
-                _ensure_cache_dir()
-                with open(os.path.join(CACHE_DIR, "sleep_raw_sample.json"), "w") as f:
-                    json.dump(session, f, indent=2)
-                saved_sample = True
+    while True:
+        payload = _api_request("GET", path, params=params)
+        points = payload.get("dataPoints", [])
+        if points and not saved_sample:
+            _ensure_cache_dir()
+            with open(os.path.join(CACHE_DIR, "sleep_raw_sample.json"), "w") as f:
+                json.dump(points[0], f, indent=2)
+            saved_sample = True
+        page_dates = []
+        for session in points:
             record = _parse_sleep_session(session)
             if record:
-                new_records.append(record)
+                page_dates.append(record["date"])
+                if record["date"] >= fetch_start.isoformat():
+                    new_records.append(record)
+        pages += 1
+        if progress_cb:
+            progress_cb(min(pages / 10.0, 0.95))
+        next_token = payload.get("nextPageToken")
+        past_window = page_dates and max(page_dates) < fetch_start.isoformat()
+        if not next_token or past_window:
+            break
+        params = {"pageToken": next_token}
 
-    # Keep the longest session per date (main sleep).
+    # Prefer the flagged main sleep, falling back to longest per date.
+    def _rank(rec):
+        return (1 if rec.get("main_sleep") else 0, rec.get("duration_minutes") or 0)
+
     best_by_date: Dict[str, Dict] = {}
     for r in new_records:
         cur = best_by_date.get(r["date"])
-        if cur is None or (r.get("duration_minutes") or 0) > (cur.get("duration_minutes") or 0):
+        if cur is None or _rank(r) > _rank(cur):
             best_by_date[r["date"]] = r
-    all_records = _merge_and_save(metric, cached, list(best_by_date.values()))
+    finals = []
+    for r in best_by_date.values():
+        r.pop("main_sleep", None)
+        finals.append(r)
+    all_records = _merge_and_save(metric, cached, finals)
     if progress_cb:
         progress_cb(1.0)
     return _sleep_records_to_df(all_records)
 
 
-_SLEEP_STAGE_KEYS = {
-    "rem_minutes": ("rem", "remSleep", "REM"),
-    "deep_minutes": ("deep", "deepSleep", "DEEP"),
-    "light_minutes": ("light", "lightSleep", "LIGHT"),
-    "wake_minutes": ("wake", "awake", "AWAKE", "WAKE"),
-}
+def _interval_end_civil_date(interval: Dict[str, Any]) -> Optional[str]:
+    """Local (civil) date of an interval's end: endTime is UTC and
+    endUtcOffset is the local offset, e.g. '3600s'."""
+    end = interval.get("endTime")
+    if not end:
+        return None
+    try:
+        end_dt = datetime.strptime(end[:19], "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return end[:10]
+    offset = _first_number(interval.get("endUtcOffset")) or 0
+    return (end_dt + timedelta(seconds=offset)).date().isoformat()
 
 
 def _parse_sleep_session(session: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Map a Google sleep session onto the Fitbit record schema.
+
+    Verified against overlapping data: Fitbit's Wake equals Google's AWAKE
+    stage minutes plus the total of `shortAwakenings`, and Fitbit's Light
+    equals Google's LIGHT minus those same short awakenings. Efficiency is
+    minutesAsleep / minutesInSleepPeriod (Fitbit reports the same ratio).
+    """
     body = session.get("sleep") or session
-    d = _civil_date(session) or _civil_date(body)
+    interval = body.get("interval") or {}
+    d = _interval_end_civil_date(interval) or _civil_date(body)
     if not d:
         return None
-    record: Dict[str, Any] = {
+
+    summary = body.get("summary") or {}
+    stage_minutes: Dict[str, float] = {}
+    for entry in summary.get("stagesSummary", []):
+        stype = entry.get("type")
+        mins = _first_number(entry.get("minutes"))
+        if stype and mins is not None and stype not in stage_minutes:
+            stage_minutes[stype] = mins  # duplicates repeat identical values
+
+    short_awake = 0.0
+    for awakening in body.get("shortAwakenings", []):
+        try:
+            s = datetime.strptime(awakening["startTime"][:19], "%Y-%m-%dT%H:%M:%S")
+            e = datetime.strptime(awakening["endTime"][:19], "%Y-%m-%dT%H:%M:%S")
+            short_awake += (e - s).total_seconds() / 60.0
+        except (KeyError, ValueError):
+            pass
+
+    duration = _first_number(summary.get("minutesInSleepPeriod"))
+    asleep = _first_number(summary.get("minutesAsleep"))
+    efficiency = None
+    if duration and asleep is not None:
+        efficiency = round(100.0 * asleep / duration)
+
+    wake = stage_minutes.get("AWAKE")
+    light = stage_minutes.get("LIGHT")
+    if wake is not None:
+        wake = wake + short_awake
+    if light is not None:
+        light = max(light - short_awake, 0.0)
+
+    return {
         "date": d,
-        "duration_minutes": _minutes(
-            body.get("duration") or body.get("totalSleepDuration")
-            or body.get("timeAsleep")
-        ),
-        "efficiency": _first_number(body.get("efficiency")),
-        "score": _first_number(body.get("score") or body.get("sleepScore")),
+        "duration_minutes": duration,
+        "efficiency": efficiency,
+        "score": None,
+        "rem_minutes": stage_minutes.get("REM"),
+        "deep_minutes": stage_minutes.get("DEEP"),
+        "light_minutes": light,
+        "wake_minutes": wake,
+        "main_sleep": bool((body.get("metadata") or {}).get("mainSleep")),
     }
-    # Stage summaries: look for a dict of stage -> duration.
-    summary = (body.get("stageSummary") or body.get("summary")
-               or body.get("levels") or {})
-    for field, keys in _SLEEP_STAGE_KEYS.items():
-        val = None
-        for key in keys:
-            if isinstance(summary, dict) and key in summary:
-                val = _minutes(summary[key])
-                break
-            if key in body:
-                val = _minutes(body[key])
-                break
-        record[field] = val
-    if record["duration_minutes"] is None:
-        stage_sum = sum(v for k, v in record.items()
-                        if k.endswith("_minutes") and isinstance(v, (int, float)))
-        record["duration_minutes"] = stage_sum or None
-    return record
 
 
 def _sleep_records_to_df(records: List[Dict]) -> pd.DataFrame:

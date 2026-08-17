@@ -19,6 +19,7 @@ import plotly.express as px
 
 import fitbit_client
 import garmin_client
+import google_health_client
 import hevy_client
 import strength_standards
 
@@ -2914,18 +2915,22 @@ def page_fitbit_data():
     """Fitbit data visualization page — weight, HRV, and RHR."""
     render_page_hero(
         "Fitbit Data",
-        "A calm, consumer-grade dashboard for recovery, sleep, movement, and body metrics streamed from Fitbit.",
+        "A calm, consumer-grade dashboard for recovery, sleep, movement, and body metrics from your wearable and scale.",
         pills=["Daily rhythm", "Recovery signals", "Activity patterns"],
         eyebrow="Connected health",
     )
 
-    if not fitbit_client.is_configured():
-        st.warning("Fitbit is not configured yet. Go to **Settings** to connect your account.")
-        st.stop()
-
-    if not fitbit_client.has_valid_token():
-        st.warning("Fitbit authorization has expired. Go to **Settings** to re-authorize.")
-        st.stop()
+    # Google Health API replaces the Fitbit Web API (sunset Sept 2026).
+    # Use it as soon as it is authorized; fall back to Fitbit until then.
+    use_google = google_health_client.has_valid_token()
+    wearable = google_health_client if use_google else fitbit_client
+    if not use_google:
+        if not fitbit_client.is_configured():
+            st.warning("Fitbit is not configured yet. Go to **Settings** to connect your account.")
+            st.stop()
+        if not fitbit_client.has_valid_token():
+            st.warning("Fitbit authorization has expired. Go to **Settings** to re-authorize.")
+            st.stop()
 
     show_trend = True
     sync_mode = st.session_state.pop("fitbit_sync_mode", None)
@@ -2941,12 +2946,14 @@ def page_fitbit_data():
         ("Activity", "fetch_activity", "activity"),
     ]
 
+    # Weight is not a wearable metric here: it merges the frozen Fitbit
+    # history (incl. manually logged entries) with live Garmin scale data;
+    # Garmin wins on shared dates.
     results = {
-        func_name: fitbit_client.load_cached_dataframe(metric_name)
+        func_name: wearable.load_cached_dataframe(metric_name)
         for _, func_name, metric_name in fetch_steps
+        if metric_name != "weight"
     }
-    # Weight now merges the frozen Fitbit history (incl. manually logged
-    # entries) with live Garmin scale data; Garmin wins on shared dates.
     results["fetch_weight"] = garmin_client.load_merged_weight()
 
     def _weight_cache_fresh() -> bool:
@@ -2959,7 +2966,7 @@ def page_fitbit_data():
         label for label, _, metric_name in fetch_steps
         if not (
             _weight_cache_fresh() if metric_name == "weight"
-            else fitbit_client.is_cache_fresh(metric_name)
+            else wearable.is_cache_fresh(metric_name)
         )
     ]
     auto_refresh = sync_mode is None and has_any_cache and len(stale_labels) > 0
@@ -2988,17 +2995,17 @@ def page_fitbit_data():
         if metric_name == "weight":
             return fetch_weight_all_sources(force_full)
         try:
-            data = getattr(fitbit_client, func_name)(force_full=force_full)
+            data = getattr(wearable, func_name)(force_full=force_full)
             return data, None
         except requests.exceptions.HTTPError as e:
             if e.response is not None and e.response.status_code == 403:
                 return pd.DataFrame(), f"{label}: not available (403 Forbidden)"
-            cached = fitbit_client.load_cached_dataframe(metric_name)
+            cached = wearable.load_cached_dataframe(metric_name)
             if not cached.empty:
                 return cached, f"{label}: live sync failed, showing cached data ({e})"
             return pd.DataFrame(), f"{label}: live sync failed and no cached data is available ({e})"
         except Exception as e:
-            cached = fitbit_client.load_cached_dataframe(metric_name)
+            cached = wearable.load_cached_dataframe(metric_name)
             if not cached.empty:
                 return cached, f"{label}: live sync failed, showing cached data ({e})"
             return pd.DataFrame(), f"{label}: live sync failed and no cached data is available ({e})"
@@ -3691,6 +3698,34 @@ def page_settings():
             "(your password stays in the terminal, it is never stored):"
         )
         st.code('.venv/bin/python garmin_login.py', language="bash")
+
+    # Google Health API (replaces the Fitbit Web API from September 2026)
+    render_section_header(
+        "Google Health API",
+        "Activity, sleep, HRV, resting heart rate, and breathing rate. "
+        "Replaces the Fitbit Web API, which shuts down in September 2026.",
+        "Sources",
+    )
+    if google_health_client.has_valid_token():
+        st.success("Connected to the Google Health API — it is the active wearable data source.")
+        if st.button("Full Google Health re-pull"):
+            try:
+                with st.spinner("Re-fetching full history from the Google Health API..."):
+                    for fetcher in (google_health_client.fetch_activity,
+                                    google_health_client.fetch_sleep,
+                                    google_health_client.fetch_hrv,
+                                    google_health_client.fetch_rhr,
+                                    google_health_client.fetch_breathing_rate):
+                        fetcher(force_full=True)
+                st.success("Google Health history re-pulled.")
+            except Exception as e:
+                st.error(f"Google Health re-pull failed: {e}")
+    else:
+        st.info(
+            "Not authorized yet — the app still uses the legacy Fitbit API. "
+            "Run this once in a terminal before September 2026:"
+        )
+        st.code('.venv/bin/python google_health_login.py', language="bash")
 
     # Status
     render_section_header("Connection Status", "A quick health check of your local Fitbit connection and token state.", "Setup")
