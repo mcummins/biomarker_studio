@@ -99,6 +99,19 @@ def _parse_weigh_ins(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Normalize a get_weigh_ins() response to [{date, weight, bmi, fat}]."""
     records: List[Dict[str, Any]] = []
 
+    def _entry_to_record(day_date, entry):
+        return {
+            "date": str(day_date)[:10],
+            "weight": _grams_to_kg(entry.get("weight")),
+            "bmi": entry.get("bmi"),
+            "fat": entry.get("bodyFat"),
+            # Body-composition extras (BIA): water in %, masses in grams.
+            "water": entry.get("bodyWater"),
+            "muscle_kg": _grams_to_kg(entry.get("muscleMass")),
+            "bone_kg": _grams_to_kg(entry.get("boneMass")),
+            "source": entry.get("sourceType") or "GARMIN",
+        }
+
     summaries = payload.get("dailyWeightSummaries") or []
     for day in summaries:
         day_date = day.get("summaryDate")
@@ -106,30 +119,14 @@ def _parse_weigh_ins(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         best = day.get("latestWeight") or (metrics[0] if metrics else None)
         if not day_date or not best:
             continue
-        records.append(
-            {
-                "date": day_date,
-                "weight": _grams_to_kg(best.get("weight")),
-                "bmi": best.get("bmi"),
-                "fat": best.get("bodyFat"),
-                "source": best.get("sourceType") or "GARMIN",
-            }
-        )
+        records.append(_entry_to_record(day_date, best))
 
     # Older/alternate response shape.
     for entry in payload.get("dateWeightList") or []:
         day_date = entry.get("calendarDate") or entry.get("date")
         if not day_date or entry.get("weight") is None:
             continue
-        records.append(
-            {
-                "date": str(day_date)[:10],
-                "weight": _grams_to_kg(entry.get("weight")),
-                "bmi": entry.get("bmi"),
-                "fat": entry.get("bodyFat"),
-                "source": entry.get("sourceType") or "GARMIN",
-            }
-        )
+        records.append(_entry_to_record(day_date, entry))
 
     return [r for r in records if r["weight"]]
 
@@ -176,13 +173,18 @@ def fetch_weight(force_full: bool = False, progress_cb=None) -> pd.DataFrame:
 
 
 def _records_to_df(records: List[Dict[str, Any]]) -> pd.DataFrame:
+    cols = ["Date", "Weight", "BMI", "Fat", "Water", "MuscleMass", "BoneMass", "Source"]
     if not records:
-        return pd.DataFrame(columns=["Date", "Weight", "BMI", "Fat", "Source"])
+        return pd.DataFrame(columns=cols)
     df = pd.DataFrame(records)
     df["Date"] = pd.to_datetime(df["date"])
     df = df.rename(
-        columns={"weight": "Weight", "bmi": "BMI", "fat": "Fat", "source": "Source"}
+        columns={"weight": "Weight", "bmi": "BMI", "fat": "Fat", "water": "Water",
+                 "muscle_kg": "MuscleMass", "bone_kg": "BoneMass", "source": "Source"}
     ).drop(columns=["date"], errors="ignore")
+    for col in cols:
+        if col not in df.columns:
+            df[col] = float("nan")
     return df.sort_values("Date").reset_index(drop=True)
 
 
@@ -201,6 +203,7 @@ def load_merged_weight(fetch: bool = False) -> pd.DataFrame:
     """
     import fitbit_client
 
+    cols = ["Date", "Weight", "BMI", "Fat", "Water", "MuscleMass", "BoneMass", "Source"]
     garmin_df = fetch_weight() if fetch else load_cached_dataframe()
     fitbit_df = fitbit_client.load_cached_dataframe("weight")
 
@@ -208,14 +211,17 @@ def load_merged_weight(fetch: bool = False) -> pd.DataFrame:
     if fitbit_df is not None and not fitbit_df.empty:
         f = fitbit_df.copy()
         f["Source"] = "FITBIT"
-        frames.append(f[["Date", "Weight", "BMI", "Fat", "Source"]])
+        for col in cols:
+            if col not in f.columns:
+                f[col] = float("nan")
+        frames.append(f[cols])
     if not garmin_df.empty:
         g = garmin_df.copy()
         g["Source"] = g.get("Source", "GARMIN").fillna("GARMIN")
-        frames.append(g[["Date", "Weight", "BMI", "Fat", "Source"]])
+        frames.append(g[cols])
 
     if not frames:
-        return pd.DataFrame(columns=["Date", "Weight", "BMI", "Fat", "Source"])
+        return pd.DataFrame(columns=cols)
 
     merged = pd.concat(frames, ignore_index=True)
     merged["Date"] = pd.to_datetime(merged["Date"]).dt.normalize()

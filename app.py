@@ -3126,6 +3126,23 @@ def page_fitbit_data():
             )
         fig_w = plot_fitbit_timeseries(weight_chart_df, "Weight", "Weight", "kg", color="#E07A5F", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None)
         render_chart(fig_w, use_container_width=True, config={"displayModeBar": False})
+
+        # Body composition from the scale's BIA reading. Day-to-day values
+        # swing with hydration; the trend line is the signal. Lean mass is
+        # computed as weight x (1 - BF%), which is directly comparable to
+        # DEXA lean mass (unlike the scale's own "muscle mass" estimate).
+        if "Fat" in weight_chart_df.columns and weight_chart_df["Fat"].notna().any():
+            bf_chart_df = weight_chart_df.dropna(subset=["Fat", "Weight"]).copy()
+            # A few scale readings report 0.0% fat (failed impedance
+            # measurement, e.g. weighing in socks) — drop the sentinels.
+            bf_chart_df = bf_chart_df[bf_chart_df["Fat"] > 3]
+            bf_chart_df["LeanMass"] = (
+                bf_chart_df["Weight"] * (1.0 - bf_chart_df["Fat"] / 100.0)
+            )
+            fig_bf = plot_fitbit_timeseries(bf_chart_df, "Fat", "Body Fat (scale BIA)", "%", color="#C97B63", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None, show_title=True)
+            render_chart(fig_bf, use_container_width=True, config={"displayModeBar": False})
+            fig_lean = plot_fitbit_timeseries(bf_chart_df, "LeanMass", "Lean Mass (weight x (1 - BF%))", "kg", color="#81B29A", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None, show_title=True)
+            render_chart(fig_lean, use_container_width=True, config={"displayModeBar": False})
     else:
         st.info("No weight data available.")
 

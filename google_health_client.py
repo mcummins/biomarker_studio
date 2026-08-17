@@ -442,14 +442,46 @@ def _rollup_series(data_type: str, start: date, end: date,
     return values
 
 
+def _azm_series(start: date, end: date, progress_cb=None,
+                progress_range=(0.0, 1.0)) -> Dict[str, Dict[str, float]]:
+    """Per-zone minutes from active-zone-minutes dailyRollUp.
+
+    Google stores CREDITED zone minutes (Fitbit's AZM convention: cardio and
+    peak count double). The app's historical series is plain time-in-zone,
+    so cardio/peak are halved here — verified against the Fitbit archive
+    (e.g. 2026-08-14: sumInCardioHeartZone 88 vs Fitbit minutesCardio 44).
+    """
+    values: Dict[str, Dict[str, float]] = {}
+    spans = list(_windows(start, end, 90))
+    for i, (w_start, w_end) in enumerate(spans):
+        if progress_cb:
+            lo, hi = progress_range
+            progress_cb(lo + (hi - lo) * i / max(len(spans), 1))
+        for point in _daily_rollup("active-zone-minutes", w_start, w_end):
+            d = _civil_date(point)
+            body = point.get("activeZoneMinutes") or {}
+            if not d or not isinstance(body, dict):
+                continue
+            fat_burn = _first_number(body.get("sumInFatBurnHeartZone")) or 0.0
+            cardio = (_first_number(body.get("sumInCardioHeartZone")) or 0.0) / 2.0
+            peak = (_first_number(body.get("sumInPeakHeartZone")) or 0.0) / 2.0
+            values[d] = {
+                "fatBurn": fat_burn,
+                "cardio": cardio,
+                "peak": peak,
+                "total": fat_burn + cardio + peak,
+            }
+    return values
+
+
 def fetch_activity(start_date: Optional[str] = None, force_full: bool = False,
                    progress_cb=None) -> pd.DataFrame:
     """
-    Daily activity via dailyRollUp: steps, distance, calories, active minutes.
-    NOTE: Fitbit's four intensity buckets (sedentary/lightly/fairly/very) and
-    three heart zones (fatBurn/cardio/peak) do not map 1:1 onto Google Health
-    data types; fields without a Google equivalent stay None so the gap is
-    visible rather than silently zero-filled.
+    Daily activity via dailyRollUp: steps, distance, calories, active minutes,
+    and per-zone heart minutes (from active-zone-minutes, converted to
+    time-in-zone). Fitbit's four intensity buckets
+    (sedentary/lightly/fairly/very) have no Google equivalent and stay None
+    so the gap is visible rather than silently zero-filled.
     """
     metric = "activity"
     cached = [] if force_full else _load_cache(metric)
@@ -464,28 +496,29 @@ def fetch_activity(start_date: Optional[str] = None, force_full: bool = False,
     distance = _rollup_series("distance", fetch_start, today, progress_cb, (0.3, 0.5))
     calories = _rollup_series("total-calories", fetch_start, today, progress_cb, (0.5, 0.8))
     active_min = _rollup_series("active-minutes", fetch_start, today, progress_cb, (0.8, 0.9))
-    azm = _rollup_series("active-zone-minutes", fetch_start, today, progress_cb, (0.9, 1.0))
+    azm = _azm_series(fetch_start, today, progress_cb, (0.9, 1.0))
     # Google reports distance in millimetres; the Fitbit series is km.
     distance = {d: round(v / 1e6, 6) for d, v in distance.items()}
 
     all_dates = sorted(set(steps) | set(distance) | set(calories) | set(active_min) | set(azm))
     new_records = []
     for d in all_dates:
+        zones = azm.get(d) or {}
         new_records.append({
             "date": d,
             "steps": steps.get(d),
             "calories": calories.get(d),
             "distance": distance.get(d),
             "activeMinutes": active_min.get(d),
-            "zoneMinutes": azm.get(d),
+            "zoneMinutes": zones.get("total"),
+            "minutesFatBurn": zones.get("fatBurn"),
+            "minutesCardio": zones.get("cardio"),
+            "minutesPeak": zones.get("peak"),
             # No 1:1 Google equivalents (kept for schema compatibility):
             "minutesFairlyActive": None,
             "minutesVeryActive": None,
             "minutesSedentary": None,
             "minutesLightlyActive": None,
-            "minutesFatBurn": None,
-            "minutesCardio": None,
-            "minutesPeak": None,
         })
     all_records = _merge_and_save(metric, cached, new_records)
     if progress_cb:
