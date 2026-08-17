@@ -3139,9 +3139,9 @@ def page_fitbit_data():
             bf_chart_df["LeanMass"] = (
                 bf_chart_df["Weight"] * (1.0 - bf_chart_df["Fat"] / 100.0)
             )
-            fig_bf = plot_fitbit_timeseries(bf_chart_df, "Fat", "Body Fat (scale BIA)", "%", color="#C97B63", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None, show_title=True)
+            fig_bf = plot_fitbit_timeseries(bf_chart_df, "Fat", "Body Fat", "%", color="#C97B63", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None, show_title=True)
             render_chart(fig_bf, use_container_width=True, config={"displayModeBar": False})
-            fig_lean = plot_fitbit_timeseries(bf_chart_df, "LeanMass", "Lean Mass (weight x (1 - BF%))", "kg", color="#81B29A", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None, show_title=True)
+            fig_lean = plot_fitbit_timeseries(bf_chart_df, "LeanMass", "Lean Mass", "kg", color="#81B29A", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None, show_title=True)
             render_chart(fig_lean, use_container_width=True, config={"displayModeBar": False})
     else:
         st.info("No weight data available.")
