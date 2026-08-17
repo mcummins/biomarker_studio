@@ -18,6 +18,8 @@ import plotly.graph_objects as go
 import plotly.express as px
 
 import fitbit_client
+import garmin_client
+import google_health_client
 import hevy_client
 import strength_standards
 
@@ -1644,7 +1646,7 @@ def compute_lift_trend_per_month(df: pd.DataFrame, value_col: str) -> Optional[f
 
 def get_latest_fitbit_weight_kg() -> Optional[float]:
     try:
-        weight_df = fitbit_client.load_cached_dataframe("weight")
+        weight_df = garmin_client.load_merged_weight()
     except Exception:
         return None
 
@@ -2913,18 +2915,22 @@ def page_fitbit_data():
     """Fitbit data visualization page — weight, HRV, and RHR."""
     render_page_hero(
         "Fitbit Data",
-        "A calm, consumer-grade dashboard for recovery, sleep, movement, and body metrics streamed from Fitbit.",
+        "A calm, consumer-grade dashboard for recovery, sleep, movement, and body metrics from your wearable and scale.",
         pills=["Daily rhythm", "Recovery signals", "Activity patterns"],
         eyebrow="Connected health",
     )
 
-    if not fitbit_client.is_configured():
-        st.warning("Fitbit is not configured yet. Go to **Settings** to connect your account.")
-        st.stop()
-
-    if not fitbit_client.has_valid_token():
-        st.warning("Fitbit authorization has expired. Go to **Settings** to re-authorize.")
-        st.stop()
+    # Google Health API replaces the Fitbit Web API (sunset Sept 2026).
+    # Use it as soon as it is authorized; fall back to Fitbit until then.
+    use_google = google_health_client.has_valid_token()
+    wearable = google_health_client if use_google else fitbit_client
+    if not use_google:
+        if not fitbit_client.is_configured():
+            st.warning("Fitbit is not configured yet. Go to **Settings** to connect your account.")
+            st.stop()
+        if not fitbit_client.has_valid_token():
+            st.warning("Fitbit authorization has expired. Go to **Settings** to re-authorize.")
+            st.stop()
 
     show_trend = True
     sync_mode = st.session_state.pop("fitbit_sync_mode", None)
@@ -2940,32 +2946,66 @@ def page_fitbit_data():
         ("Activity", "fetch_activity", "activity"),
     ]
 
+    # Weight is not a wearable metric here: it merges the frozen Fitbit
+    # history (incl. manually logged entries) with live Garmin scale data;
+    # Garmin wins on shared dates.
     results = {
-        func_name: fitbit_client.load_cached_dataframe(metric_name)
+        func_name: wearable.load_cached_dataframe(metric_name)
         for _, func_name, metric_name in fetch_steps
+        if metric_name != "weight"
     }
+    results["fetch_weight"] = garmin_client.load_merged_weight()
+
+    def _weight_cache_fresh() -> bool:
+        if garmin_client.is_configured():
+            return garmin_client.is_cache_fresh()
+        return fitbit_client.is_cache_fresh("weight")
+
     has_any_cache = any(not df.empty for df in results.values())
     stale_labels = [
         label for label, _, metric_name in fetch_steps
-        if not fitbit_client.is_cache_fresh(metric_name)
+        if not (
+            _weight_cache_fresh() if metric_name == "weight"
+            else wearable.is_cache_fresh(metric_name)
+        )
     ]
     auto_refresh = sync_mode is None and has_any_cache and len(stale_labels) > 0
     if sync_mode is None and not has_any_cache:
         sync_mode = "incremental"
 
+    def fetch_weight_all_sources(force_full: bool):
+        """Refresh weight. Garmin is the live source once configured; the
+        Fitbit weight API stopped receiving scale data on 2026-07-22, so it
+        is only fetched while Garmin is not yet set up."""
+        warnings = []
+        if garmin_client.is_configured():
+            try:
+                garmin_client.fetch_weight(force_full=force_full)
+            except Exception as e:
+                warnings.append(f"Weight (Garmin): live sync failed, showing cached data ({e})")
+        else:
+            try:
+                fitbit_client.fetch_weight(force_full=force_full)
+            except Exception as e:
+                warnings.append(f"Weight (Fitbit): live sync failed, showing cached data ({e})")
+        merged = garmin_client.load_merged_weight()
+        return merged, ("; ".join(warnings) or None)
+
     def fetch_fitbit_metric(label: str, func_name: str, metric_name: str, force_full: bool):
+        if metric_name == "weight":
+            return fetch_weight_all_sources(force_full)
         try:
-            data = getattr(fitbit_client, func_name)(force_full=force_full)
+            data = getattr(wearable, func_name)(force_full=force_full)
             return data, None
         except requests.exceptions.HTTPError as e:
             if e.response is not None and e.response.status_code == 403:
                 return pd.DataFrame(), f"{label}: not available (403 Forbidden)"
-            cached = fitbit_client.load_cached_dataframe(metric_name)
+            cached = wearable.load_cached_dataframe(metric_name)
             if not cached.empty:
                 return cached, f"{label}: live sync failed, showing cached data ({e})"
             return pd.DataFrame(), f"{label}: live sync failed and no cached data is available ({e})"
         except Exception as e:
-            cached = fitbit_client.load_cached_dataframe(metric_name)
+            cached = wearable.load_cached_dataframe(metric_name)
             if not cached.empty:
                 return cached, f"{label}: live sync failed, showing cached data ({e})"
             return pd.DataFrame(), f"{label}: live sync failed and no cached data is available ({e})"
@@ -3086,6 +3126,23 @@ def page_fitbit_data():
             )
         fig_w = plot_fitbit_timeseries(weight_chart_df, "Weight", "Weight", "kg", color="#E07A5F", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None)
         render_chart(fig_w, use_container_width=True, config={"displayModeBar": False})
+
+        # Body composition from the scale's BIA reading. Day-to-day values
+        # swing with hydration; the trend line is the signal. Lean mass is
+        # computed as weight x (1 - BF%), which is directly comparable to
+        # DEXA lean mass (unlike the scale's own "muscle mass" estimate).
+        if "Fat" in weight_chart_df.columns and weight_chart_df["Fat"].notna().any():
+            bf_chart_df = weight_chart_df.dropna(subset=["Fat", "Weight"]).copy()
+            # A few scale readings report 0.0% fat (failed impedance
+            # measurement, e.g. weighing in socks) — drop the sentinels.
+            bf_chart_df = bf_chart_df[bf_chart_df["Fat"] > 3]
+            bf_chart_df["LeanMass"] = (
+                bf_chart_df["Weight"] * (1.0 - bf_chart_df["Fat"] / 100.0)
+            )
+            fig_bf = plot_fitbit_timeseries(bf_chart_df, "Fat", "Body Fat (scale BIA)", "%", color="#C97B63", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None, show_title=True)
+            render_chart(fig_bf, use_container_width=True, config={"displayModeBar": False})
+            fig_lean = plot_fitbit_timeseries(bf_chart_df, "LeanMass", "Lean Mass (weight x (1 - BF%))", "kg", color="#81B29A", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None, show_title=True)
+            render_chart(fig_lean, use_container_width=True, config={"displayModeBar": False})
     else:
         st.info("No weight data available.")
 
@@ -3460,7 +3517,7 @@ def page_lifts():
     current_bodyweight_kg = get_latest_fitbit_weight_kg()
     if strength_standards.has_data() and current_bodyweight_kg is not None:
         st.caption(
-            f"Strength standards use your latest cached Fitbit weight "
+            f"Strength standards use your latest cached weigh-in "
             f"({format_fitbit_metric_value(current_bodyweight_kg, 'kg', 1)}) and male thresholds."
         )
 
@@ -3618,6 +3675,74 @@ def page_settings():
         if st.button("Clear Hevy cache"):
             hevy_client.clear_cache()
             st.success("Hevy cache cleared.")
+
+    # Garmin (weight source since the scale stopped reaching the Fitbit API)
+    render_section_header(
+        "Garmin",
+        "Weigh-ins from the Garmin scale. Garmin Connect is the live weight source; "
+        "the Fitbit weight history (including manual entries) is kept and merged in.",
+        "Sources",
+    )
+    if garmin_client.is_configured():
+        st.success("Connected to Garmin Connect")
+        garmin_weight_df = garmin_client.load_cached_dataframe()
+        if not garmin_weight_df.empty:
+            last_garmin = pd.to_datetime(garmin_weight_df["Date"]).max()
+            st.caption(
+                f"{len(garmin_weight_df)} cached weigh-ins, latest "
+                f"{format_display_date(last_garmin)}"
+            )
+        garmin_col1, garmin_col2 = st.columns(2)
+        with garmin_col1:
+            if st.button("Sync Garmin weight now"):
+                try:
+                    with st.spinner("Fetching Garmin weigh-ins..."):
+                        garmin_df = garmin_client.fetch_weight()
+                    st.success(f"Garmin weight synced ({len(garmin_df)} weigh-ins).")
+                except Exception as e:
+                    st.error(f"Garmin sync failed: {e}")
+        with garmin_col2:
+            if st.button("Full Garmin re-pull"):
+                try:
+                    with st.spinner("Re-fetching full Garmin weight history..."):
+                        garmin_df = garmin_client.fetch_weight(force_full=True)
+                    st.success(f"Garmin history re-pulled ({len(garmin_df)} weigh-ins).")
+                except Exception as e:
+                    st.error(f"Garmin full re-pull failed: {e}")
+    else:
+        st.info(
+            "Not connected. Run this once in a terminal, then reload this page "
+            "(your password stays in the terminal, it is never stored):"
+        )
+        st.code('.venv/bin/python garmin_login.py', language="bash")
+
+    # Google Health API (replaces the Fitbit Web API from September 2026)
+    render_section_header(
+        "Google Health API",
+        "Activity, sleep, HRV, resting heart rate, and breathing rate. "
+        "Replaces the Fitbit Web API, which shuts down in September 2026.",
+        "Sources",
+    )
+    if google_health_client.has_valid_token():
+        st.success("Connected to the Google Health API — it is the active wearable data source.")
+        if st.button("Full Google Health re-pull"):
+            try:
+                with st.spinner("Re-fetching full history from the Google Health API..."):
+                    for fetcher in (google_health_client.fetch_activity,
+                                    google_health_client.fetch_sleep,
+                                    google_health_client.fetch_hrv,
+                                    google_health_client.fetch_rhr,
+                                    google_health_client.fetch_breathing_rate):
+                        fetcher(force_full=True)
+                st.success("Google Health history re-pulled.")
+            except Exception as e:
+                st.error(f"Google Health re-pull failed: {e}")
+    else:
+        st.info(
+            "Not authorized yet — the app still uses the legacy Fitbit API. "
+            "Run this once in a terminal before September 2026:"
+        )
+        st.code('.venv/bin/python google_health_login.py', language="bash")
 
     # Status
     render_section_header("Connection Status", "A quick health check of your local Fitbit connection and token state.", "Setup")
