@@ -297,10 +297,14 @@ def _cache_path(metric: str) -> str:
 
 
 def is_cache_fresh(metric: str) -> bool:
+    """True if this metric's cache was already written today (local time).
+
+    Sleep/HRV/RHR/breathing land once each morning, so a cache from
+    yesterday must refetch even if less than 24h old."""
     path = _cache_path(metric)
     if not os.path.exists(path):
         return False
-    return datetime.now().timestamp() - os.path.getmtime(path) < CACHE_MAX_AGE_SECONDS
+    return datetime.fromtimestamp(os.path.getmtime(path)).date() == date.today()
 
 
 def _load_cache(metric: str) -> List[Dict]:
@@ -317,13 +321,20 @@ def _save_cache(metric: str, records: List[Dict]) -> None:
         json.dump(records, f)
 
 
+# Re-fetch this many trailing days on every incremental sync. A day fetched
+# while still in progress is cached with partial totals; without an overlap
+# it would be frozen at that value forever (the legacy fitbit_client had
+# exactly this bug — the parity report's "low" days were frozen mornings).
+RESYNC_OVERLAP_DAYS = 2
+
+
 def _resolve_fetch_start(metric: str, cached: List[Dict], start_date: Optional[str],
                          force_full: bool) -> Optional[date]:
     if not force_full and is_cache_fresh(metric) and cached:
         return None
     if cached and not force_full:
         last = max(r["date"] for r in cached if r.get("date"))
-        return date.fromisoformat(last) + timedelta(days=1)
+        return date.fromisoformat(last) - timedelta(days=RESYNC_OVERLAP_DAYS - 1)
     if start_date:
         return date.fromisoformat(start_date)
     return date.fromisoformat(EARLIEST_DATE)
