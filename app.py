@@ -3190,15 +3190,18 @@ def page_fitbit_data():
             bf_chart_df["LeanMass"] = (
                 bf_chart_df["Weight"] * (1.0 - bf_chart_df["Fat"] / 100.0)
             )
+            bf_chart_df["FatMass"] = bf_chart_df["Weight"] * bf_chart_df["Fat"] / 100.0
             fig_bf = plot_fitbit_timeseries(bf_chart_df, "Fat", "Body Fat", "%", color="#C97B63", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None, show_title=True)
             render_chart(fig_bf, use_container_width=True, config={"displayModeBar": False})
             st.caption(
                 "Body fat before 24 Nov 2025 (first DEXA, which calibrated the scale) "
                 "is shown as an assumed flat 20% — readings from that era aren't trusted. "
-                "Lean mass uses the same assumption."
+                "Lean and fat mass use the same assumption."
             )
             fig_lean = plot_fitbit_timeseries(bf_chart_df, "LeanMass", "Lean Mass", "kg", color="#81B29A", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None, show_title=True)
             render_chart(fig_lean, use_container_width=True, config={"displayModeBar": False})
+            fig_fatmass = plot_fitbit_timeseries(bf_chart_df, "FatMass", "Fat Mass", "kg", color="#9C6B5E", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None, show_title=True)
+            render_chart(fig_fatmass, use_container_width=True, config={"displayModeBar": False})
 
         waist_df = load_waist_history()
         if not waist_df.empty:
