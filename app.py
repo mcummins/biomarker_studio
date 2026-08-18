@@ -28,6 +28,11 @@ import strength_standards
 # -----------------------------
 EXCLUDE_SHEETS = {"All Data", "Optimal Ranges", "Centiles", "Graphs", "Labs and notes", "NN Metabolic Scorecard", "Dexa", "Additional Waist Measurements"}
 BLOOD_SHEET_ID = "1pfYaK6t25gcKdBAUu8_geyGlQP6wp6px9IyNUKI4wdw"
+# Body-fat readings before the first DEXA scan (which calibrated the scale)
+# came from poor equipment and are not believed; charts use an assumed flat
+# 20% for that era instead. Raw values remain untouched in the data table.
+BF_TRUSTED_FROM = "2025-11-24"
+ASSUMED_EARLY_BF_PCT = 20.0
 DEFAULT_GROUP_SHEETS = []  # will be filled dynamically
 TIME_PRESETS = ["30 days", "90 days", "1 year", "All time", "Custom"]
 LAST_PLOTLY_ZOOM_EVENT_KEY = "_last_plotly_zoom_event_id"
@@ -3173,7 +3178,12 @@ def page_fitbit_data():
         # computed as weight x (1 - BF%), which is directly comparable to
         # DEXA lean mass (unlike the scale's own "muscle mass" estimate).
         if "Fat" in weight_chart_df.columns and weight_chart_df["Fat"].notna().any():
-            bf_chart_df = weight_chart_df.dropna(subset=["Fat", "Weight"]).copy()
+            bf_chart_df = weight_chart_df.dropna(subset=["Weight"]).copy()
+            # Pre-DEXA era: override untrusted readings with the assumed flat
+            # value (see BF_TRUSTED_FROM).
+            early_era = bf_chart_df["Date"] < pd.Timestamp(BF_TRUSTED_FROM)
+            bf_chart_df.loc[early_era, "Fat"] = ASSUMED_EARLY_BF_PCT
+            bf_chart_df = bf_chart_df.dropna(subset=["Fat"])
             # A few scale readings report 0.0% fat (failed impedance
             # measurement, e.g. weighing in socks) — drop the sentinels.
             bf_chart_df = bf_chart_df[bf_chart_df["Fat"] > 3]
@@ -3182,6 +3192,11 @@ def page_fitbit_data():
             )
             fig_bf = plot_fitbit_timeseries(bf_chart_df, "Fat", "Body Fat", "%", color="#C97B63", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None, show_title=True)
             render_chart(fig_bf, use_container_width=True, config={"displayModeBar": False})
+            st.caption(
+                "Body fat before 24 Nov 2025 (first DEXA, which calibrated the scale) "
+                "is shown as an assumed flat 20% — readings from that era aren't trusted. "
+                "Lean mass uses the same assumption."
+            )
             fig_lean = plot_fitbit_timeseries(bf_chart_df, "LeanMass", "Lean Mass", "kg", color="#81B29A", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None, show_title=True)
             render_chart(fig_lean, use_container_width=True, config={"displayModeBar": False})
 
