@@ -26,7 +26,8 @@ import strength_standards
 # -----------------------------
 # Config
 # -----------------------------
-EXCLUDE_SHEETS = {"All Data", "Optimal Ranges", "Centiles", "Graphs", "Labs and notes", "NN Metabolic Scorecard", "Dexa"}
+EXCLUDE_SHEETS = {"All Data", "Optimal Ranges", "Centiles", "Graphs", "Labs and notes", "NN Metabolic Scorecard", "Dexa", "Additional Waist Measurements"}
+BLOOD_SHEET_ID = "1pfYaK6t25gcKdBAUu8_geyGlQP6wp6px9IyNUKI4wdw"
 DEFAULT_GROUP_SHEETS = []  # will be filled dynamically
 TIME_PRESETS = ["30 days", "90 days", "1 year", "All time", "Custom"]
 LAST_PLOTLY_ZOOM_EVENT_KEY = "_last_plotly_zoom_event_id"
@@ -1644,6 +1645,46 @@ def compute_lift_trend_per_month(df: pd.DataFrame, value_col: str) -> Optional[f
     return float(slope * 30.4375)
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_waist_history() -> pd.DataFrame:
+    """Waist circumference from the Google Sheet: the dedicated
+    'Additional Waist Measurements' tab plus the Biometrics row
+    (blood-test dates), merged and deduped by date."""
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+
+        sa_path = os.path.join(os.path.dirname(__file__), "sheet_api_key.json")
+        with open(sa_path) as f:
+            info = json.load(f)
+        creds = Credentials.from_service_account_info(
+            info, scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"])
+        sh = gspread.authorize(creds).open_by_key(BLOOD_SHEET_ID)
+
+        records: Dict[pd.Timestamp, float] = {}
+        bio_rows = sh.worksheet("Biometrics").get_all_values()
+        if bio_rows:
+            dates = bio_rows[0][2:]
+            for row in bio_rows[1:]:
+                if row and row[0].strip().lower() == "waist circumference":
+                    for d, v in zip(dates, row[2:]):
+                        try:
+                            records[pd.Timestamp(d).normalize()] = float(v)
+                        except (ValueError, TypeError):
+                            continue
+        for row in sh.worksheet("Additional Waist Measurements").get_all_values()[1:]:
+            try:
+                records[pd.Timestamp(row[0]).normalize()] = float(row[1])
+            except (ValueError, TypeError, IndexError):
+                continue
+        if not records:
+            return pd.DataFrame(columns=["Date", "Waist"])
+        df = pd.DataFrame({"Date": list(records.keys()), "Waist": list(records.values())})
+        return df.sort_values("Date").reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame(columns=["Date", "Waist"])
+
+
 def get_latest_fitbit_weight_kg() -> Optional[float]:
     try:
         weight_df = garmin_client.load_merged_weight()
@@ -3143,6 +3184,12 @@ def page_fitbit_data():
             render_chart(fig_bf, use_container_width=True, config={"displayModeBar": False})
             fig_lean = plot_fitbit_timeseries(bf_chart_df, "LeanMass", "Lean Mass", "kg", color="#81B29A", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None, show_title=True)
             render_chart(fig_lean, use_container_width=True, config={"displayModeBar": False})
+
+        waist_df = load_waist_history()
+        if not waist_df.empty:
+            fig_waist = plot_fitbit_timeseries(waist_df, "Waist", "Waist", "cm", color="#B08968", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None, show_title=True)
+            render_chart(fig_waist, use_container_width=True, config={"displayModeBar": False})
+            st.caption("Waist measurements come from the blood-panel Google Sheet (Biometrics + Additional Waist Measurements tabs).")
     else:
         st.info("No weight data available.")
 
@@ -3697,7 +3744,7 @@ def page_settings():
             if st.button("Sync Garmin weight now"):
                 try:
                     with st.spinner("Fetching Garmin weigh-ins..."):
-                        garmin_df = garmin_client.fetch_weight()
+                        garmin_df = garmin_client.fetch_weight(force_refresh=True)
                     st.success(f"Garmin weight synced ({len(garmin_df)} weigh-ins).")
                 except Exception as e:
                     st.error(f"Garmin sync failed: {e}")

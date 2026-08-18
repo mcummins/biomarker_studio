@@ -45,11 +45,15 @@ def is_configured() -> bool:
 
 
 def is_cache_fresh() -> bool:
-    """True if the weight cache was written within the last 24 hours."""
+    """True if the weight cache was already written today (local time).
+
+    Weigh-ins land once per morning, so a cache from yesterday must refetch
+    even if it is less than 24 hours old — otherwise this morning's weigh-in
+    stays invisible until the afternoon."""
     if not os.path.exists(WEIGHT_CACHE_PATH):
         return False
-    age = datetime.now().timestamp() - os.path.getmtime(WEIGHT_CACHE_PATH)
-    return age < CACHE_MAX_AGE_SECONDS
+    mtime = datetime.fromtimestamp(os.path.getmtime(WEIGHT_CACHE_PATH))
+    return mtime.date() == date.today()
 
 
 def _get_api():
@@ -131,13 +135,16 @@ def _parse_weigh_ins(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [r for r in records if r["weight"]]
 
 
-def fetch_weight(force_full: bool = False, progress_cb=None) -> pd.DataFrame:
+def fetch_weight(force_full: bool = False, force_refresh: bool = False,
+                 progress_cb=None) -> pd.DataFrame:
     """
     Fetch Garmin weigh-ins. Incremental: only asks Garmin for dates after the
-    last cached entry (minus a small overlap). force_full re-pulls everything.
+    last cached entry (minus a small overlap). force_full re-pulls everything;
+    force_refresh skips the same-day freshness check (used by the manual sync
+    button so it always hits the API).
     """
     cached = [] if force_full else _load_cache()
-    if cached and not force_full and is_cache_fresh():
+    if cached and not force_full and not force_refresh and is_cache_fresh():
         return _records_to_df(cached)
     if cached:
         last = max(r["date"] for r in cached)
