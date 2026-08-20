@@ -33,17 +33,20 @@ BLOOD_SHEET_ID = "1pfYaK6t25gcKdBAUu8_geyGlQP6wp6px9IyNUKI4wdw"
 # 20% for that era instead. Raw values remain untouched in the data table.
 BF_TRUSTED_FROM = "2025-11-24"
 ASSUMED_EARLY_BF_PCT = 20.0
-# Recommended cut/bulk operating bands (cut floor -> bulk ceiling), shaded on
-# the body-composition charts. Rationale: floor = lifelong-setpoint fat mass
-# (~12 kg) on the current frame; ceiling = half of the 2026 bulk's excursion,
-# stopping where the fat-forward drift began.
+# Recommended cut/bulk operating bands, shaded on the body-composition
+# charts as (cut floor, bulk ceiling, clinical cutoff). Rationale: floor =
+# lifelong-setpoint fat mass (~12 kg) on the current frame; ceiling = half
+# of the 2026 bulk's excursion, stopping where the fat-forward drift began;
+# clinical = obesity-adjacent thresholds (waist-to-height 0.5 at 193 cm,
+# 25% body fat for men, and the fat mass equivalent at ~86 kg).
 BODY_COMP_BANDS = {
-    "Fat": (15.0, 18.5),       # %
-    "FatMass": (12.0, 15.5),   # kg
-    "Waist": (83.5, 88.5),     # cm
+    "Fat": (15.0, 18.5, 25.0),       # %
+    "FatMass": (12.0, 15.5, 21.5),   # kg
+    "Waist": (83.5, 88.5, 96.5),     # cm
 }
-BAND_FILL_COLOR = "rgba(129, 178, 154, 0.18)"   # in-band: green wash
-BAND_OVER_COLOR = "rgba(224, 122, 95, 0.12)"    # above ceiling: amber wash
+BAND_FILL_COLOR = "rgba(129, 178, 154, 0.18)"   # in-band: sage green
+BAND_OVER_COLOR = "rgba(242, 204, 143, 0.35)"   # above ceiling: soft amber (matches blood panel)
+BAND_RED_COLOR = "rgba(224, 122, 95, 0.25)"     # above clinical cutoff: soft rose
 DEFAULT_GROUP_SHEETS = []  # will be filled dynamically
 TIME_PRESETS = ["30 days", "90 days", "1 year", "All time", "Custom"]
 LAST_PLOTLY_ZOOM_EVENT_KEY = "_last_plotly_zoom_event_id"
@@ -1204,11 +1207,12 @@ def plot_fitbit_timeseries(df: pd.DataFrame, y_col: str, title: str,
                            show_primary_series: bool = True,
                            date_window: Optional[Tuple[pd.Timestamp, pd.Timestamp]] = None,
                            show_title: bool = False,
-                           target_band: Optional[Tuple[float, float]] = None) -> go.Figure:
+                           target_band: Optional[Tuple[float, float, float]] = None) -> go.Figure:
     """Generic time-series chart for Fitbit metrics.
 
-    target_band=(floor, ceiling) shades the recommended operating range in
-    green and everything above the ceiling in amber.
+    target_band=(floor, ceiling, clinical) shades the recommended operating
+    range in green, ceiling-to-clinical in amber, and above the clinical
+    cutoff in rose.
     """
     fig = go.Figure()
     if df.empty or y_col not in df.columns:
@@ -1219,14 +1223,15 @@ def plot_fitbit_timeseries(df: pd.DataFrame, y_col: str, title: str,
         return fig
 
     if target_band is not None:
-        band_floor, band_ceiling = target_band
+        band_floor, band_ceiling, band_clinical = target_band
         fig.add_hrect(y0=band_floor, y1=band_ceiling, fillcolor=BAND_FILL_COLOR,
                       line_width=0, layer="below")
+        fig.add_hrect(y0=band_ceiling, y1=band_clinical, fillcolor=BAND_OVER_COLOR,
+                      line_width=0, layer="below")
         data_max = float(df[y_col].max())
-        over_top = max(data_max * 1.02, band_ceiling + (band_ceiling - band_floor) * 0.15)
-        if over_top > band_ceiling:
-            fig.add_hrect(y0=band_ceiling, y1=over_top, fillcolor=BAND_OVER_COLOR,
-                          line_width=0, layer="below")
+        red_top = max(data_max * 1.02, band_clinical + (band_clinical - band_floor) * 0.08)
+        fig.add_hrect(y0=band_clinical, y1=red_top, fillcolor=BAND_RED_COLOR,
+                      line_width=0, layer="below")
 
     visible_df = df
     if date_window is not None:
@@ -3219,11 +3224,6 @@ def page_fitbit_data():
             bf_chart_df["FatMass"] = bf_chart_df["Weight"] * bf_chart_df["Fat"] / 100.0
             fig_bf = plot_fitbit_timeseries(bf_chart_df, "Fat", "Body Fat", "%", color="#C97B63", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None, show_title=True, target_band=BODY_COMP_BANDS["Fat"])
             render_chart(fig_bf, use_container_width=True, config={"displayModeBar": False})
-            st.caption(
-                "Body fat before 24 Nov 2025 (first DEXA, which calibrated the scale) "
-                "is shown as an assumed flat 20% — readings from that era aren't trusted. "
-                "Lean and fat mass use the same assumption."
-            )
             fig_lean = plot_fitbit_timeseries(bf_chart_df, "LeanMass", "Lean Mass", "kg", color="#81B29A", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None, show_title=True)
             render_chart(fig_lean, use_container_width=True, config={"displayModeBar": False})
             fig_fatmass = plot_fitbit_timeseries(bf_chart_df, "FatMass", "Fat Mass", "kg", color="#9C6B5E", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None, show_title=True, target_band=BODY_COMP_BANDS["FatMass"])
@@ -3235,9 +3235,10 @@ def page_fitbit_data():
             render_chart(fig_waist, use_container_width=True, config={"displayModeBar": False})
             st.caption(
                 "Waist measurements come from the blood-panel Google Sheet (Biometrics + "
-                "Additional Waist Measurements tabs). Green band = recommended cut/bulk "
-                "operating range (cut floor → bulk ceiling: 15–18.5% body fat, "
-                "12–15.5 kg fat mass, 83.5–88.5 cm waist); amber = above the bulk ceiling."
+                "Additional Waist Measurements tabs). Green = cut/bulk operating range "
+                "(15–18.5% body fat, 12–15.5 kg fat mass, 83.5–88.5 cm waist); "
+                "amber = above the bulk ceiling; red = clinical territory "
+                "(25% body fat, 21.5 kg, waist 96.5 cm = waist-to-height 0.5)."
             )
     else:
         st.info("No weight data available.")
