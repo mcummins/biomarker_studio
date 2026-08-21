@@ -3233,13 +3233,6 @@ def page_fitbit_data():
         if not waist_df.empty:
             fig_waist = plot_fitbit_timeseries(waist_df, "Waist", "Waist", "cm", color="#B08968", show_trend=show_trend, show_primary_series=show_primary_fitbit_series, date_window=(fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None, show_title=True, target_band=BODY_COMP_BANDS["Waist"])
             render_chart(fig_waist, use_container_width=True, config={"displayModeBar": False})
-            st.caption(
-                "Waist measurements come from the blood-panel Google Sheet (Biometrics + "
-                "Additional Waist Measurements tabs). Green = cut/bulk operating range "
-                "(15–18.5% body fat, 12–15.5 kg fat mass, 83.5–88.5 cm waist); "
-                "amber = above the bulk ceiling; red = clinical territory "
-                "(25% body fat, 21.5 kg, waist 96.5 cm = waist-to-height 0.5)."
-            )
     else:
         st.info("No weight data available.")
 
