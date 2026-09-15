@@ -2999,8 +2999,19 @@ def page_fitbit_data():
 
     # Google Health API replaces the Fitbit Web API (sunset Sept 2026).
     # Use it as soon as it is authorized; fall back to Fitbit until then.
-    use_google = google_health_client.has_valid_token()
+    # A revoked Google token still renders the Google cache (the newest
+    # data available) behind a re-authorize prompt — not the frozen
+    # Fitbit fallback.
+    google_reauth_needed = google_health_client.needs_reauth()
+    use_google = google_health_client.has_valid_token() or google_reauth_needed
     wearable = google_health_client if use_google else fitbit_client
+    if google_reauth_needed:
+        st.error(
+            "Google Health authorization has expired or been revoked, so live "
+            "sync is paused and the charts below show cached data. Reconnect "
+            "by running this in a terminal, then reload this page:"
+        )
+        st.code('.venv/bin/python google_health_login.py', language="bash")
     if not use_google:
         if not fitbit_client.is_configured():
             st.warning("Fitbit is not configured yet. Go to **Settings** to connect your account.")
@@ -3046,8 +3057,15 @@ def page_fitbit_data():
             else wearable.is_cache_fresh(metric_name)
         )
     ]
-    auto_refresh = sync_mode is None and has_any_cache and len(stale_labels) > 0
-    if sync_mode is None and not has_any_cache:
+    # Warnings stashed by the previous run's failed fetch pass (displayed
+    # further down, popped there) also pause auto-refresh for one run so a
+    # failing API is not hammered on every rerun; manual sync still works.
+    sync_blocked = google_reauth_needed or bool(st.session_state.get("fitbit_fetch_warnings"))
+    auto_refresh = (
+        sync_mode is None and has_any_cache and len(stale_labels) > 0
+        and not sync_blocked
+    )
+    if sync_mode is None and not has_any_cache and not sync_blocked:
         sync_mode = "incremental"
 
     def fetch_weight_all_sources(force_full: bool):
@@ -3154,13 +3172,13 @@ def page_fitbit_data():
     refresh_notice = st.session_state.pop("fitbit_refresh_notice", None)
     if refresh_notice:
         st.success(refresh_notice)
+    for warning in st.session_state.pop("fitbit_fetch_warnings", []):
+        st.warning(warning)
     if auto_refresh:
         stale_text = ", ".join(stale_labels[:3])
         if len(stale_labels) > 3:
             stale_text += ", and more"
         st.info(f"Showing cached Fitbit data now while stale feeds refresh in the background: {stale_text}.")
-    for warning in fetch_warnings:
-        st.warning(warning)
 
     all_dfs = [weight_df, hrv_df, rhr_df, br_df, sleep_df, activity_df]
     latest_dates = []
@@ -3528,14 +3546,13 @@ def page_fitbit_data():
             progress_text.caption("Fitbit data loaded.")
             progress_bar.progress(1.0)
 
-        if sync_mode is not None:
-            st.session_state["fitbit_refresh_notice"] = "Fitbit data refreshed."
-            st.rerun()
-        if auto_refresh and not fetch_warnings:
-            st.session_state["fitbit_refresh_notice"] = "Fitbit data refreshed in the background."
-            st.rerun()
         if fetch_warnings:
-            loading_placeholder.empty()
+            st.session_state["fitbit_fetch_warnings"] = fetch_warnings
+        elif sync_mode is not None:
+            st.session_state["fitbit_refresh_notice"] = "Fitbit data refreshed."
+        else:
+            st.session_state["fitbit_refresh_notice"] = "Fitbit data refreshed in the background."
+        st.rerun()
 
     if PRINT_MODE:
         return
@@ -3827,6 +3844,13 @@ def page_settings():
                 st.success("Google Health history re-pulled.")
             except Exception as e:
                 st.error(f"Google Health re-pull failed: {e}")
+    elif google_health_client.needs_reauth():
+        st.error(
+            "Authorization has expired or been revoked — live sync is paused "
+            "and the app shows cached data. Re-run this in a terminal, then "
+            "reload this page:"
+        )
+        st.code('.venv/bin/python google_health_login.py', language="bash")
     else:
         st.info(
             "Not authorized yet — the app still uses the legacy Fitbit API. "

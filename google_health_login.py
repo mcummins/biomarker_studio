@@ -1,7 +1,10 @@
 """
-One-time Google Health API authorization. Run it yourself in a terminal:
+Google Health API authorization. Run it yourself in a terminal:
 
     .venv/bin/python google_health_login.py
+
+Run it once at setup, and again any time the app says authorization has
+expired or been revoked.
 
 Before the first run, create the OAuth client (once):
 
@@ -10,10 +13,16 @@ Before the first run, create the OAuth client (once):
 2. "APIs & Services" -> "Library" -> search "Google Health API" -> Enable.
    (If it is not listed, enable it via
    https://console.cloud.google.com/apis/library/health.googleapis.com)
-3. "APIs & Services" -> "OAuth consent screen":
-   - User type: External, then add your own Google account under
-     "Test users". Leave the app in Testing mode — no verification needed
-     for personal use.
+3. "APIs & Services" -> "OAuth consent screen" (a.k.a. Google Auth
+   Platform): User type: External, then PUBLISH THE APP TO PRODUCTION
+   ("Publish app" on the OAuth consent screen / Audience page). Do NOT
+   leave it in Testing mode: Google expires refresh tokens of
+   Testing-status apps after 7 days, which silently killed sync in
+   Aug 2026. Production requires filling in the Branding page (app name,
+   support email, homepage and privacy policy URLs — a personal site is
+   fine); no verification submission is needed for personal use, the
+   consent page just shows an "unverified app" warning you can click
+   through (Advanced -> continue).
 4. "APIs & Services" -> "Credentials" -> "Create credentials" ->
    "OAuth client ID" -> Application type: "Desktop app".
 5. Copy the Client ID and Client Secret; this script asks for both on the

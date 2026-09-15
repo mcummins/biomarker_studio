@@ -71,11 +71,19 @@ def is_configured() -> bool:
 
 def has_valid_token() -> bool:
     config = load_config()
+    if config.get("reauth_required"):
+        return False
     if config.get("refresh_token"):
         return True
     if config.get("access_token"):
         return datetime.now().timestamp() < config.get("expires_at", 0)
     return False
+
+
+def needs_reauth() -> bool:
+    """True once Google has rejected the refresh token as expired/revoked;
+    cleared by a successful re-authorization (google_health_login.py)."""
+    return bool(load_config().get("reauth_required"))
 
 
 def build_auth_url(client_id: str, redirect_uri: str) -> str:
@@ -112,8 +120,15 @@ def exchange_code(code: str, redirect_uri: str) -> Dict[str, Any]:
     config["access_token"] = tokens["access_token"]
     config["refresh_token"] = tokens.get("refresh_token", config.get("refresh_token"))
     config["expires_at"] = datetime.now().timestamp() + tokens.get("expires_in", 3600) - 60
+    config.pop("reauth_required", None)
     save_config(config)
     return config
+
+
+REAUTH_MESSAGE = (
+    "Google Health authorization has expired or been revoked. Re-run "
+    "`.venv/bin/python google_health_login.py` to reconnect."
+)
 
 
 def _get_access_token() -> str:
@@ -125,6 +140,8 @@ def _get_access_token() -> str:
             "Google Health API is not authorized yet. Run "
             "`.venv/bin/python google_health_login.py` once."
         )
+    if config.get("reauth_required"):
+        raise RuntimeError(REAUTH_MESSAGE)
     resp = requests.post(
         TOKEN_URL,
         data={
@@ -135,6 +152,18 @@ def _get_access_token() -> str:
         },
         timeout=REQUEST_TIMEOUT,
     )
+    if resp.status_code == 400:
+        try:
+            oauth_error = resp.json().get("error", "")
+        except ValueError:
+            oauth_error = ""
+        if oauth_error == "invalid_grant":
+            # Definitive revocation (e.g. the 7-day refresh-token expiry on
+            # Testing-status OAuth apps) — retrying cannot succeed, only a
+            # new login can.
+            config["reauth_required"] = True
+            save_config(config)
+            raise RuntimeError(REAUTH_MESSAGE)
     resp.raise_for_status()
     tokens = resp.json()
     config["access_token"] = tokens["access_token"]
