@@ -21,6 +21,7 @@ import fitbit_client
 import garmin_client
 import google_health_client
 import hevy_client
+import epigenetic
 import strength_standards
 
 # -----------------------------
@@ -183,6 +184,33 @@ LIFTS_PAGE_CONFIG = [
     {"label": "Deadlift", "source_titles": ["Deadlift (Barbell)", "Deadlift (Trap Bar)"]},
     {"label": "Overhead Press", "source_titles": ["Overhead Press (Barbell)"]},
     {"label": "Bicep Curl", "source_titles": ["Bicep Curl (Dumbbell)", "Bicep Curl (Barbell)"]},
+]
+# -----------------------------
+# Epigenetic clocks (OmicMAge workbook)
+# -----------------------------
+EPI_SHEET_ID = "1dNqV7F0CnZkXULEocpdaVdxQdQl1uKJ0Vtr7fIVNPZg"
+EPI_VIEWS = ["Absolute age", "Delta age", "Centile"]
+# Which form each clock view prefers, then what to fall back to when a metric
+# was never reported in that form: the organ systems have no charted centile
+# history, and the OmicMAge components / DNAm proxies only exist as centiles.
+EPI_VIEW_FORMS = {
+    "Absolute age": [epigenetic.FORM_ABSOLUTE, epigenetic.FORM_DELTA, epigenetic.FORM_CENTILE],
+    "Delta age": [epigenetic.FORM_DELTA, epigenetic.FORM_ABSOLUTE, epigenetic.FORM_CENTILE],
+    "Centile": [epigenetic.FORM_CENTILE, epigenetic.FORM_DELTA, epigenetic.FORM_ABSOLUTE],
+}
+EPI_SERIES_COLOR = "#E07A5F"
+EPI_CALENDAR_COLOR = "#8A9A95"
+# Reference bands for the immunosenescence ratios, taken from the sheet's own
+# row notes: CD4/CD8 is "ideally between 1 and 4" (shaded as a target), and
+# the NLR / LMR notes quote population means ± SD (shaded as neutral context).
+EPI_REFERENCE_BANDS = {
+    "CD4/CD8 T cell ratio": (1.0, 4.0, BAND_FILL_COLOR),
+    "Neutrophil to Lymphocyte": (1.0, 2.4, "rgba(24, 50, 47, 0.07)"),
+    "Lymphocyte to Monocyte": (8.01, 14.29, "rgba(24, 50, 47, 0.07)"),
+}
+EPI_COMPOSITION_COLORS = [
+    "#E07A5F", "#81B29A", "#F2CC8F", "#7EB8DA", "#9C6B5E", "#4F8F73",
+    "#D4C5B5", "#A991FF", "#F1B07B", "#BED8C7", "#B08968", "#3D405B",
 ]
 PLOTLY_ZOOM_SYNC = components.declare_component(
     "plotly_zoom_sync",
@@ -923,6 +951,33 @@ def render_background_view_controls(scope: str) -> str:
     return "Biohacker Enhanced" if enhanced else "Biohacker"
 
 
+def render_epi_view_controls(scope: str) -> str:
+    """Sidebar radio choosing how the age clocks are expressed.
+
+    Same shadow-key pattern as the biohacker toggles so the choice survives
+    page switches.
+    """
+    st.sidebar.markdown('<hr class="sidebar-divider">', unsafe_allow_html=True)
+    st.sidebar.markdown('<div class="section-header" style="border-bottom:none; margin-top:0.5rem; font-size:1.1rem;">Clock view</div>', unsafe_allow_html=True)
+    persist_key = f"{scope}_view_on"
+    current = st.session_state.get(persist_key, EPI_VIEWS[0])
+    view = st.sidebar.radio(
+        "Clock view",
+        EPI_VIEWS,
+        index=EPI_VIEWS.index(current) if current in EPI_VIEWS else 0,
+        key=f"{scope}_view",
+        label_visibility="collapsed",
+        help=(
+            "Absolute age plots each clock against your calendar age; Delta age "
+            "plots the gap (negative = younger); Centile plots where you sit in "
+            "the reference population. Markers that are only ever reported as "
+            "centiles (OmicMAge components, DNAm proxies) always show centiles."
+        ),
+    )
+    st.session_state[persist_key] = view
+    return view
+
+
 def add_centile_zones(
     fig: go.Figure,
     y: pd.Series,
@@ -1302,6 +1357,498 @@ def plot_fitbit_timeseries(df: pd.DataFrame, y_col: str, title: str,
     return fig
 
 
+# ---------------------------------------------------------------------------
+# Epigenetic clock visualization helpers
+# ---------------------------------------------------------------------------
+
+def _epi_hover_text(text: str, width: int = 72, max_lines: int = 6) -> str:
+    """Wrap free text for a Plotly hover box (which only understands <br>)."""
+    import textwrap
+    safe = str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    lines = textwrap.wrap(safe, width)
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        lines[-1] += " …"
+    return "<br>".join(lines)
+
+
+def _epi_window(df: pd.DataFrame, date_window) -> Tuple[pd.Timestamp, pd.Timestamp]:
+    if date_window is not None:
+        x0, x1 = pd.to_datetime(date_window[0]), pd.to_datetime(date_window[1])
+    else:
+        x0, x1 = df["Date"].min(), df["Date"].max()
+    if x0 == x1:
+        x0, x1 = x0 - pd.Timedelta(days=30), x1 + pd.Timedelta(days=30)
+    return x0, x1
+
+
+def plot_epi_series(
+    df: pd.DataFrame,
+    title: str,
+    y_label: str,
+    color: str = EPI_SERIES_COLOR,
+    date_window=None,
+    height: int = 320,
+    reference=None,
+    lower_is_better: bool = True,
+    centile_direction: Optional[str] = None,
+    reference_band: Optional[Tuple[float, float, str]] = None,
+    shade_outside_band: bool = False,
+    sample_notes: Optional[Dict] = None,
+    value_fmt: str = ".2f",
+    unit_suffix: str = "",
+    show_trend: bool = True,
+) -> go.Figure:
+    """Sparse-sample chart for one epigenetic metric.
+
+    ``reference`` is either a constant (a delta's zero line, DunedinPoA's 1.0
+    pace) or a ``Date``/``Value`` frame of calendar ages; the favourable side
+    of it (per ``lower_is_better``) shades green, the other side amber.
+    ``centile_direction`` switches to a fixed 0–100 axis shaded with the
+    centile gradient (no shading when the direction is unknown, "").
+    ``reference_band`` shades a (low, high, colour) band, optionally with
+    amber outside it.
+    """
+    fig = go.Figure()
+    if df.empty:
+        return fig
+    g = df.dropna(subset=["Value"]).sort_values("Date")
+    if g.empty:
+        return fig
+    x0, x1 = _epi_window(g, date_window)
+    y = g["Value"].astype(float)
+    good_color, bad_color = (
+        (BAND_FILL_COLOR, BAND_OVER_COLOR) if lower_is_better else (BAND_OVER_COLOR, BAND_FILL_COLOR)
+    )
+
+    # ---- y range and background shading ----
+    if centile_direction is not None:
+        y_min, y_max = 0.0, 100.0
+        if centile_direction in ("Lower", "Higher"):
+            for lo in range(0, 100, 20):
+                goodness = (lo + 10) / 100.0
+                if centile_direction == "Lower":
+                    goodness = 1.0 - goodness
+                fig.add_hrect(
+                    y0=lo, y1=lo + 20, fillcolor=centile_band_color(goodness),
+                    opacity=0.22, line_width=0, layer="below",
+                )
+    else:
+        candidates = [float(y.min()), float(y.max())]
+        if isinstance(reference, pd.DataFrame):
+            ref_values = reference["Value"].dropna().astype(float)
+            if not ref_values.empty:
+                candidates += [float(ref_values.min()), float(ref_values.max())]
+        elif reference is not None:
+            candidates.append(float(reference))
+        if reference_band is not None:
+            candidates += [float(reference_band[0]), float(reference_band[1])]
+        y_min, y_max = min(candidates), max(candidates)
+        span = (y_max - y_min) or 1.0
+        y_min -= 0.08 * span
+        y_max += 0.08 * span
+    fig.update_yaxes(range=[y_min, y_max])
+
+    if isinstance(reference, pd.DataFrame):
+        # Calendar age is linear in time, so the sampled ages extend cleanly
+        # across the whole window as a fitted line; shade either side of it.
+        ref = reference.dropna(subset=["Value"]).sort_values("Date")
+        if len(ref) >= 2:
+            base = ref["Date"].min()
+            days = (ref["Date"] - base).dt.days.values.astype(float)
+            slope, intercept = np.polyfit(days, ref["Value"].values.astype(float), 1)
+            grid = pd.date_range(x0, x1, periods=50)
+            grid_y = slope * (grid - base).days.values.astype(float) + intercept
+        else:
+            grid = pd.DatetimeIndex(ref["Date"])
+            grid_y = ref["Value"].values.astype(float)
+        edge = dict(mode="lines", line=dict(width=0), hoverinfo="skip", showlegend=False)
+        fig.add_trace(go.Scatter(x=grid, y=[y_min] * len(grid), **edge))
+        fig.add_trace(go.Scatter(x=grid, y=grid_y, fill="tonexty", fillcolor=good_color, **edge))
+        fig.add_trace(go.Scatter(x=grid, y=[y_max] * len(grid), fill="tonexty", fillcolor=bad_color, **edge))
+        fig.add_trace(go.Scatter(
+            x=grid, y=grid_y, mode="lines", name="Calendar age",
+            line=dict(color=EPI_CALENDAR_COLOR, width=1.5, dash="dash"),
+            hovertemplate="Calendar age: %{y:.1f} y<br>%{x|%d %b %Y}<extra></extra>",
+        ))
+    elif reference is not None:
+        ref_value = float(reference)
+        fig.add_hrect(y0=y_min, y1=ref_value, fillcolor=good_color, line_width=0, layer="below")
+        fig.add_hrect(y0=ref_value, y1=y_max, fillcolor=bad_color, line_width=0, layer="below")
+        fig.add_hline(y=ref_value, line_dash="dot", line_color=EPI_CALENDAR_COLOR)
+
+    if reference_band is not None:
+        band_lo, band_hi, band_color = reference_band
+        if shade_outside_band:
+            fig.add_hrect(y0=y_min, y1=band_lo, fillcolor=BAND_OVER_COLOR, line_width=0, layer="below")
+            fig.add_hrect(y0=band_hi, y1=y_max, fillcolor=BAND_OVER_COLOR, line_width=0, layer="below")
+        fig.add_hrect(y0=band_lo, y1=band_hi, fillcolor=band_color, line_width=0, layer="below")
+        fig.add_hline(y=band_lo, line_dash="dot", line_color=EPI_CALENDAR_COLOR)
+        fig.add_hline(y=band_hi, line_dash="dot", line_color=EPI_CALENDAR_COLOR)
+
+    # ---- main series ----
+    hover = []
+    for _, row in g.iterrows():
+        when = pd.Timestamp(row["Date"]).normalize()
+        parts = [
+            f"<b>{title}</b>",
+            when.strftime("%d %b %Y"),
+            f"{format(float(row['Value']), value_fmt)}{unit_suffix}",
+        ]
+        if row.get("derived"):
+            parts.append("<i>Derived: predicted age − calendar age</i>")
+        note = (sample_notes or {}).get(when)
+        if note:
+            parts.append(f"<i>{_epi_hover_text(note)}</i>")
+        hover.append("<br>".join(parts))
+    fig.add_trace(go.Scatter(
+        x=g["Date"], y=y, mode="lines+markers", name=title, hoverinfo="text", text=hover,
+        line=dict(color=color, width=2.5),
+        marker=dict(size=7, color=color, line=dict(width=1, color="#FFFFFF")),
+    ))
+
+    if show_trend and len(g) >= 3:
+        days = (g["Date"] - g["Date"].min()).dt.days.values.astype(float)
+        slope, intercept = np.polyfit(days, y.values, 1)
+        x_line = pd.date_range(start=g["Date"].min(), end=g["Date"].max(), periods=50)
+        y_line = slope * (x_line - g["Date"].min()).days.values.astype(float) + intercept
+        fig.add_trace(go.Scatter(
+            x=x_line, y=y_line, mode="lines", name="Trend", hoverinfo="skip",
+            line=dict(dash="dash", color="#D4C5B5", width=2),
+        ))
+
+    fig.update_layout(margin=dict(l=10, r=10, t=20, b=40), height=height, yaxis_title=y_label)
+    fig.update_xaxes(range=[x0, x1])
+    apply_warm_theme(fig)
+    return fig
+
+
+def plot_epi_heatmap(
+    values: pd.DataFrame,
+    goodness: Optional[pd.DataFrame] = None,
+    height: Optional[int] = None,
+    date_fmt: str = "%d %b %y",
+    value_label: str = "Centile",
+) -> go.Figure:
+    """Metric × sample-date grid with the raw value printed in each cell.
+
+    Colour is ``goodness`` in [0, 1] on the centile gradient when the
+    direction of each row is known, else a neutral sequential scale of the
+    raw 0–100 value.
+    """
+    fig = go.Figure()
+    if values.empty:
+        return fig
+    columns = list(values.columns)
+    x_labels = [pd.Timestamp(c).strftime(date_fmt) for c in columns]
+    full_dates = [pd.Timestamp(c).strftime("%d %b %Y") for c in columns]
+    text = [["" if pd.isna(v) else f"{v:.0f}" for v in row] for row in values.values]
+    customdata = [
+        [[full_dates[j], text[i][j] or "—"] for j in range(len(columns))]
+        for i in range(len(values))
+    ]
+    if goodness is not None:
+        z = goodness.reindex(index=values.index, columns=values.columns).values.astype(float)
+        colorscale = [[stop, colour] for stop, colour in CENTILE_GRADIENT]
+        zmin, zmax = 0.0, 1.0
+    else:
+        z = values.values.astype(float)
+        colorscale = [[0.0, "#F6F1EA"], [1.0, "#5F8F86"]]
+        zmin, zmax = 0.0, 100.0
+    fig.add_trace(go.Heatmap(
+        z=z, x=x_labels, y=list(values.index), zmin=zmin, zmax=zmax, colorscale=colorscale,
+        text=text, texttemplate="%{text}", textfont=dict(size=10, color="#18322f"),
+        customdata=customdata,
+        hovertemplate="<b>%{y}</b><br>%{customdata[0]}<br>" + value_label + ": %{customdata[1]}<extra></extra>",
+        showscale=False, xgap=2, ygap=2, hoverongaps=False,
+    ))
+    fig.update_yaxes(autorange="reversed", tickfont=dict(size=11))
+    fig.update_xaxes(side="top", tickfont=dict(size=11))
+    fig.update_layout(height=height or (70 + 24 * len(values)), margin=dict(l=10, r=10, t=30, b=10))
+    apply_warm_theme(fig)
+    return fig
+
+
+def plot_epi_composition(wide: pd.DataFrame, height: int = 380, y_label: str = "% of cells") -> go.Figure:
+    """Stacked bars of immune-cell composition, one bar per sample."""
+    fig = go.Figure()
+    if wide.empty:
+        return fig
+    wide = wide.sort_index()
+    labels = [pd.Timestamp(d).strftime("%d %b %Y") for d in wide.index]
+    for i, column in enumerate(wide.columns):
+        fig.add_trace(go.Bar(
+            x=labels, y=wide[column].values, name=str(column),
+            marker=dict(color=EPI_COMPOSITION_COLORS[i % len(EPI_COMPOSITION_COLORS)], line=dict(width=0)),
+            hovertemplate=f"<b>{column}</b><br>%{{x}}<br>%{{y:.2f}}%<extra></extra>",
+        ))
+    apply_warm_theme(fig)
+    fig.update_layout(
+        barmode="stack", height=height, margin=dict(l=10, r=10, t=10, b=40),
+        yaxis_title=y_label, bargap=0.35,
+        showlegend=True, legend=dict(orientation="h", yanchor="bottom", y=1.0, x=0, font=dict(size=11)),
+    )
+    return fig
+
+
+def plot_epi_organ_snapshot(latest: pd.DataFrame, form: str, calendar_age_value: Optional[float]) -> go.Figure:
+    """Horizontal bars of the newest organ-system readings, oldest at the top."""
+    fig = go.Figure()
+    if latest.empty:
+        return fig
+    g = latest.sort_values("Value", ascending=True)
+    is_delta = form == epigenetic.FORM_DELTA
+    reference = 0.0 if is_delta else calendar_age_value
+    colors = [
+        "#81B29A" if (reference is not None and v < reference) else "#F2CC8F"
+        for v in g["Value"]
+    ]
+    labels = [f"{v:+.1f}" if is_delta else f"{v:.1f}" for v in g["Value"]]
+    hover = [
+        f"<b>{m}</b><br>{pd.Timestamp(d).strftime('%d %b %Y')}<br>{label} years"
+        for m, d, label in zip(g["metric"], g["Date"], labels)
+    ]
+    fig.add_trace(go.Bar(
+        x=g["Value"], y=g["metric"], orientation="h",
+        marker=dict(color=colors, line=dict(width=0)),
+        text=labels, textposition="outside", textfont=dict(size=11), cliponaxis=False,
+        hoverinfo="text", hovertext=hover,
+    ))
+    values = [float(v) for v in g["Value"]]
+    if reference is not None:
+        values.append(float(reference))
+        fig.add_vline(
+            x=reference, line_dash="dot" if is_delta else "dash", line_color=EPI_CALENDAR_COLOR,
+            annotation_text="" if is_delta else f"Calendar age {reference:.1f}",
+            annotation_position="top", annotation_font=dict(size=11, color="#4F5D5A"),
+        )
+    lo, hi = min(values), max(values)
+    span = (hi - lo) or 1.0
+    fig.update_xaxes(range=[lo - 0.15 * span, hi + 0.15 * span])
+    fig.update_layout(
+        height=70 + 30 * len(g), margin=dict(l=10, r=30, t=30, b=30), bargap=0.3,
+        xaxis_title="Δ years vs calendar age" if is_delta else "Years",
+    )
+    apply_warm_theme(fig)
+    return fig
+
+
+def epi_pick_form(rows: pd.DataFrame, view: str) -> Tuple[pd.DataFrame, str]:
+    """The rows of the form the view prefers, falling back per EPI_VIEW_FORMS."""
+    for form in EPI_VIEW_FORMS.get(view, EPI_VIEW_FORMS[EPI_VIEWS[0]]):
+        series = rows[rows["form"] == form]
+        if not series.empty:
+            return series, form
+    return rows.iloc[0:0], ""
+
+
+def epi_form_label(form: str, unit: str, direction: str) -> str:
+    if form == epigenetic.FORM_CENTILE:
+        if direction == "Lower":
+            return "Centile · lower is better"
+        if direction == "Higher":
+            return "Centile · higher is better"
+        return "Centile"
+    if form == epigenetic.FORM_DELTA:
+        return "Δ years vs calendar age"
+    return unit or "Value"
+
+
+def _ordinal(value) -> str:
+    n = int(round(float(value)))
+    suffix = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def epi_format_value(value, form: str, unit: str) -> str:
+    if pd.isna(value):
+        return "—"
+    value = float(value)
+    if form == epigenetic.FORM_CENTILE:
+        return f"{value:.0f}"
+    if form == epigenetic.FORM_DELTA:
+        return f"{value:+.2f} y"
+    unit_key = (unit or "").strip().lower()
+    if unit_key == "years":
+        return f"{value:.2f} y"
+    if unit_key == "years per year":
+        return f"{value:.2f} y/y"
+    if unit_key == "kilobases":
+        return f"{value:.2f} kb"
+    if unit_key == "%":
+        return f"{value:.2f}%"
+    return f"{value:.2f}"
+
+
+def build_epi_chart(
+    data: pd.DataFrame,
+    section: str,
+    metric: str,
+    view: str,
+    title: Optional[str] = None,
+    calendar: Optional[pd.DataFrame] = None,
+    sample_notes: Optional[Dict] = None,
+    height: int = 320,
+    date_window=None,
+) -> Optional[Tuple[str, str, go.Figure]]:
+    """(title, meta line, figure) for one metric in the form the view asks for."""
+    rows = data[(data["section"] == section) & (data["metric"] == metric)]
+    if rows.empty:
+        return None
+    series, form = epi_pick_form(rows, view)
+    if series.empty:
+        return None
+    title = title or metric
+    unit = str(series["unit"].iloc[0] or "")
+    direction = str(series["direction"].iloc[0] or "")
+    latest = series.loc[series["Date"].idxmax()]
+    common = dict(date_window=date_window, height=height, sample_notes=sample_notes)
+    lower_is_better = direction != "Higher"
+    if form == epigenetic.FORM_CENTILE:
+        fig = plot_epi_series(series, title, "Centile", centile_direction=direction, value_fmt=".1f", **common)
+    elif form == epigenetic.FORM_DELTA:
+        fig = plot_epi_series(
+            series, title, "Δ years", reference=0.0, lower_is_better=lower_is_better,
+            value_fmt="+.2f", unit_suffix=" y", **common,
+        )
+    else:
+        unit_key = unit.strip().lower()
+        if unit_key == "years" and calendar is not None and not calendar.empty:
+            fig = plot_epi_series(
+                series, title, "Years", reference=calendar, lower_is_better=lower_is_better,
+                unit_suffix=" y", **common,
+            )
+        elif unit_key == "years per year":
+            fig = plot_epi_series(
+                series, title, "Years per year", reference=1.0, lower_is_better=lower_is_better,
+                unit_suffix=" y/y", **common,
+            )
+        elif metric in EPI_REFERENCE_BANDS:
+            fig = plot_epi_series(series, title, unit or "Value", reference_band=EPI_REFERENCE_BANDS[metric], **common)
+        else:
+            suffix = {"kilobases": " kb", "%": "%"}.get(unit_key, "")
+            fig = plot_epi_series(series, title, unit or "Value", unit_suffix=suffix, **common)
+    meta = (
+        f"{epi_form_label(form, unit, direction)} · "
+        f"Latest {epi_format_value(latest['Value'], form, unit)} · {format_display_date(latest['Date'])}"
+    )
+    return title, meta, fig
+
+
+def render_epi_chart_grid(cards: List[Optional[Tuple[str, str, go.Figure]]], ncols: int = 3) -> None:
+    cards = [card for card in cards if card is not None]
+    for start in range(0, len(cards), ncols):
+        cols = st.columns(ncols)
+        for col, (title, meta, fig) in zip(cols, cards[start:start + ncols]):
+            with col:
+                meta_html = f"<div class='chart-card-meta'>{html.escape(meta)}</div>" if meta else ""
+                st.markdown(
+                    f"<div class='chart-card-title'>{html.escape(title)}</div>{meta_html}",
+                    unsafe_allow_html=True,
+                )
+                render_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+
+def epi_latest_row(long: pd.DataFrame, section: str, metric: str, form: str) -> Optional[pd.Series]:
+    rows = long[
+        (long["section"] == section) & (long["metric"] == metric) & (long["form"] == form)
+    ].dropna(subset=["Value"])
+    if rows.empty:
+        return None
+    return rows.loc[rows["Date"].idxmax()]
+
+
+def render_epi_headline_cards(
+    long: pd.DataFrame,
+    calendar: pd.DataFrame,
+    sample_notes: Dict,
+    latest_date: pd.Timestamp,
+) -> None:
+    def stale(row) -> str:
+        if pd.Timestamp(row["Date"]) == latest_date:
+            return ""
+        return f" · Last measured {format_display_date(row['Date'])}"
+
+    cards = []
+    note = sample_notes.get(latest_date, "")
+    cards.append({
+        "title": "Latest sample",
+        "value": format_display_date(latest_date),
+        "footnote": (note[:90].rstrip() + "…") if len(note) > 90 else (note or "OmicMAge report"),
+        "status": "neutral",
+    })
+    calendar_now = epigenetic.calendar_age_at(calendar, latest_date)
+    if calendar_now is not None:
+        cards.append({
+            "title": "Calendar age",
+            "value": f"{calendar_now:.1f} y",
+            "footnote": "At the latest sample",
+            "status": "neutral",
+        })
+
+    def age_card(section: str, metric: str, title: str) -> Optional[Dict[str, str]]:
+        age = epi_latest_row(long, section, metric, epigenetic.FORM_ABSOLUTE)
+        if age is None:
+            return None
+        delta = epi_latest_row(long, section, metric, epigenetic.FORM_DELTA)
+        centile = epi_latest_row(long, section, metric, epigenetic.FORM_CENTILE)
+        bits, status = [], "neutral"
+        if delta is not None and pd.Timestamp(delta["Date"]) == pd.Timestamp(age["Date"]):
+            bits.append(f"Δ {delta['Value']:+.1f} y vs calendar")
+            status = "good" if delta["Value"] < 0 else "caution"
+        if centile is not None and pd.Timestamp(centile["Date"]) == pd.Timestamp(age["Date"]):
+            bits.append(f"{_ordinal(centile['Value'])} centile")
+        return {
+            "title": title,
+            "value": f"{age['Value']:.1f} y",
+            "footnote": " · ".join(bits) + stale(age),
+            "status": status,
+        }
+
+    cards.append(age_card(epigenetic.SECTION_CLOCKS, "OMICm Age", "OMICm Age"))
+    cards.append(age_card(epigenetic.SECTION_SYMPHONY, "SymphonyAge", "SymphonyAge"))
+
+    pace = epi_latest_row(long, epigenetic.SECTION_CLOCKS, "DunedinPoA", epigenetic.FORM_ABSOLUTE)
+    if pace is not None:
+        cards.append({
+            "title": "DunedinPoA",
+            "value": f"{pace['Value']:.2f} y/y",
+            "footnote": "Pace of aging · 1.0 = typical" + stale(pace),
+            "status": "good" if pace["Value"] < 1.0 else "caution",
+        })
+
+    cards.append(age_card(epigenetic.SECTION_TELOMERES, "Telomere Age Prediction", "Telomere age"))
+
+    length = epi_latest_row(long, epigenetic.SECTION_TELOMERES, "Telomere length", epigenetic.FORM_ABSOLUTE)
+    if length is not None:
+        length_centile = epi_latest_row(long, epigenetic.SECTION_TELOMERES, "Telomere length", epigenetic.FORM_CENTILE)
+        if length_centile is not None:
+            footnote = f"{_ordinal(length_centile['Value'])} centile for age ({format_display_date(length_centile['Date'])})"
+        else:
+            footnote = "Mean telomere length"
+        cards.append({
+            "title": "Telomere length",
+            "value": f"{length['Value']:.2f} kb",
+            "footnote": footnote + stale(length),
+            "status": "neutral",
+        })
+
+    organs = long[(long["section"] == epigenetic.SECTION_ORGANS) & (long["form"] == epigenetic.FORM_DELTA)]
+    if not organs.empty:
+        newest = organs.loc[organs.groupby("metric")["Date"].idxmax()].sort_values("Value")
+        younger, total = int((newest["Value"] < 0).sum()), len(newest)
+        youngest, oldest = newest.iloc[0], newest.iloc[-1]
+        cards.append({
+            "title": "Organ systems younger",
+            "value": f"{younger} of {total}",
+            "footnote": (
+                f"Youngest: {youngest['metric']} ({youngest['Value']:+.1f} y) · "
+                f"Oldest: {oldest['metric']} ({oldest['Value']:+.1f} y)"
+            ),
+            "status": "good" if younger * 2 >= total else "caution",
+        })
+
+    render_dexa_summary_card_grid([card for card in cards if card is not None])
 def plot_lift_timeseries(
     df: pd.DataFrame,
     title: str,
@@ -3737,6 +4284,355 @@ def page_lifts():
     render_print_button()
 
 
+def page_epigenetic():
+    """Epigenetic clocks, organ-system ages, telomeres, immune ageing and the
+    TruHealth percentile panel, from the OmicMAge results workbook."""
+    hero_placeholder = st.empty()
+
+    with st.sidebar:
+        sheets = None
+        local_key_path = os.path.join(os.path.dirname(__file__), "sheet_api_key.json")
+        if os.path.exists(local_key_path):
+            try:
+                with open(local_key_path, "r") as f:
+                    service_account_info = json.load(f)
+                sheets = load_from_gsheets(EPI_SHEET_ID, service_account_info)
+            except Exception as e:
+                st.error(f"Auto-load of the epigenetic workbook failed: {e}")
+        if sheets is None:
+            st.write(
+                "Add `sheet_api_key.json` to the project root (with the OmicMAge "
+                "workbook shared to the service account), or upload an Excel export."
+            )
+            up = st.file_uploader("Upload the OmicMAge workbook (.xlsx)", type=["xlsx"], key="epi_xlsx")
+            if up is not None:
+                sheets = load_from_xlsx(up)
+
+    if sheets is None:
+        st.info("Load the epigenetic workbook from Google Sheets or upload an Excel export to begin.")
+        st.stop()
+
+    epi_long = epigenetic.parse_main(sheets.get(epigenetic.MAIN_SHEET))
+    if epi_long.empty:
+        st.error(f"Expected sheet '{epigenetic.MAIN_SHEET}' with dated columns was not found.")
+        st.stop()
+    sample_notes = epigenetic.parse_sample_notes(sheets.get(epigenetic.NOTES_SHEET))
+    tru_long, tru_notes = epigenetic.parse_truhealth(sheets.get(epigenetic.TRUHEALTH_SHEET))
+    calendar = epigenetic.calendar_age(epi_long)
+
+    all_dates = pd.concat([epi_long["Date"], tru_long["Date"]]) if not tru_long.empty else epi_long["Date"]
+    min_date, max_date = all_dates.min(), all_dates.max()
+    latest_date = pd.Timestamp(epi_long["Date"].max())
+
+    render_plotly_zoom_sync("epigenetic", min_date, max_date)
+    time_start, time_end = render_time_controls("epigenetic", min_date, max_date)
+    view = render_epi_view_controls("epigenetic")
+    st.sidebar.markdown('<hr class="sidebar-divider">', unsafe_allow_html=True)
+    # Shadow key so the choice survives page switches (see the biohacker toggles).
+    show_all_markers = st.sidebar.toggle(
+        "Show all TruHealth markers",
+        value=st.session_state.get("epi_truhealth_all_on", False),
+        key="epi_truhealth_all",
+        help="Off: chart only the markers flagged High, Low or Suboptimal in the latest TruHealth report. On: chart every marker in the sheet, in sheet order.",
+    )
+    st.session_state["epi_truhealth_all_on"] = show_all_markers
+    end_inclusive = time_end + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+    window = (time_start, time_end)
+    data = epi_long[(epi_long["Date"] >= time_start) & (epi_long["Date"] <= end_inclusive)].copy()
+    tru_data = (
+        tru_long[(tru_long["Date"] >= time_start) & (tru_long["Date"] <= end_inclusive)].copy()
+        if not tru_long.empty else tru_long
+    )
+
+    with hero_placeholder.container():
+        render_page_hero(
+            "Epigenetic Clocks",
+            "Biological age, organ-system ageing, telomeres, immune ageing and TruHealth percentiles from your OmicMAge reports.",
+            pills=["Biological age", "Organ systems", "TruHealth"],
+            eyebrow="Biomarker Studio",
+        )
+
+    component_options = epigenetic.metrics_in(epi_long, epigenetic.SECTION_COMPONENTS)
+    tru_latest = epigenetic.truhealth_latest(tru_long)
+    tru_options = tru_latest["marker"].tolist() if not tru_latest.empty else []
+    tru_flagged = tru_latest[tru_latest["status"] != ""]["marker"].tolist() if not tru_latest.empty else []
+
+    chart_kwargs = dict(calendar=calendar, sample_notes=sample_notes, date_window=window)
+
+    # ---- Headline ----
+    render_section_header("Headline Numbers", "", "Summary")
+    render_epi_headline_cards(epi_long, calendar, sample_notes, latest_date)
+
+    if data.empty:
+        st.info("No epigenetic samples fall inside the selected time window.")
+    else:
+        # ---- Clocks ----
+        render_section_header(
+            "Epigenetic Clocks",
+            "OMICm Age and SymphonyAge are DNA-methylation estimates of biological age; DunedinPoA is the pace of ageing in years per calendar year.",
+            "Biological age",
+        )
+        render_epi_chart_grid([
+            build_epi_chart(data, epigenetic.SECTION_CLOCKS, "OMICm Age", view, **chart_kwargs),
+            build_epi_chart(data, epigenetic.SECTION_SYMPHONY, "SymphonyAge", view, **chart_kwargs),
+            build_epi_chart(data, epigenetic.SECTION_CLOCKS, "DunedinPoA", view, **chart_kwargs),
+        ])
+
+        # ---- Organ systems ----
+        render_section_header("SymphonyAge Organ Systems", "", "Organ-specific ageing")
+        organ_rows = data[data["section"] == epigenetic.SECTION_ORGANS]
+        if organ_rows.empty:
+            st.caption("No organ-system readings fall inside the selected time window.")
+        else:
+            organ_series, organ_form = epi_pick_form(organ_rows, view)
+            if organ_form != EPI_VIEW_FORMS[view][0]:
+                st.caption(
+                    "Organ-system centiles were only reported for two samples and are not charted; "
+                    f"showing {epi_form_label(organ_form, 'Years', 'Lower')} instead."
+                )
+            newest = organ_series.loc[organ_series.groupby("metric")["Date"].idxmax()]
+            newest_date = pd.Timestamp(newest["Date"].max())
+            st.markdown(
+                f"<div class='chart-card-title'>Latest snapshot</div>"
+                f"<div class='chart-card-meta'>{html.escape(epi_form_label(organ_form, 'Years', 'Lower'))} · "
+                f"{html.escape(format_display_date(newest_date))} · green = younger than calendar age</div>",
+                unsafe_allow_html=True,
+            )
+            render_chart(
+                plot_epi_organ_snapshot(newest, organ_form, epigenetic.calendar_age_at(calendar, newest_date)),
+                use_container_width=True, config={"displayModeBar": False},
+            )
+            render_epi_chart_grid([
+                build_epi_chart(data, epigenetic.SECTION_ORGANS, organ, view, height=280, **chart_kwargs)
+                for organ in epigenetic.metrics_in(epi_long, epigenetic.SECTION_ORGANS)
+            ])
+
+        # ---- OmicMAge components ----
+        render_section_header(
+            "OmicMAge Components",
+            "The proteins, metabolites and clinical markers that feed OMICm Age, as population centiles adjusted so that green is always the favourable end.",
+            "Inputs",
+        )
+        components = data[(data["section"] == epigenetic.SECTION_COMPONENTS) & (data["form"] == epigenetic.FORM_CENTILE)]
+        if components.empty:
+            st.caption("No component centiles fall inside the selected time window.")
+        else:
+            values = components.pivot_table(index="metric", columns="Date", values="Value", aggfunc="mean")
+            values = values.reindex([m for m in component_options if m in values.index])
+            directions = components.groupby("metric")["direction"].first()
+            goodness = values.copy()
+            for metric in goodness.index:
+                if directions.get(metric) == "Higher":
+                    goodness.loc[metric] = values.loc[metric] / 100.0
+                elif directions.get(metric) == "Lower":
+                    goodness.loc[metric] = 1.0 - values.loc[metric] / 100.0
+                else:
+                    goodness.loc[metric] = 0.5
+            st.markdown(
+                "<div class='chart-card-title'>Overview</div>"
+                "<div class='chart-card-meta'>Cell text is the raw centile; colour runs from unfavourable (rose) to favourable (green) given each marker's optimal direction.</div>",
+                unsafe_allow_html=True,
+            )
+            render_chart(plot_epi_heatmap(values, goodness), use_container_width=True, config={"displayModeBar": False})
+            render_epi_chart_grid([
+                build_epi_chart(data, epigenetic.SECTION_COMPONENTS, metric, view, height=280, **chart_kwargs)
+                for metric in component_options
+            ])
+
+        # ---- Telomeres ----
+        render_section_header("Telomeres", "", "Chromosome ends")
+        render_epi_chart_grid([
+            build_epi_chart(data, epigenetic.SECTION_TELOMERES, "Telomere length", view, **chart_kwargs),
+            build_epi_chart(
+                data, epigenetic.SECTION_TELOMERES, "Telomere Age Prediction", view,
+                title="Telomere age prediction", **chart_kwargs,
+            ),
+        ], ncols=2)
+
+        # ---- Immunosenescence ----
+        render_section_header(
+            "Immunosenescence",
+            "Immune cell ratios and composition. Reports up to January 2025 give absolute cell fractions and ratios; "
+            "from May 2025 the same rows are population centiles, so the two eras are shown separately.",
+            "Immune ageing",
+        )
+        immune = data[data["section"] == epigenetic.SECTION_IMMUNE]
+        if immune.empty:
+            st.caption("No immune readings fall inside the selected time window.")
+        else:
+            render_epi_chart_grid([
+                build_epi_chart(data, epigenetic.SECTION_IMMUNE, metric, view, **chart_kwargs)
+                for metric in epigenetic.metrics_in(epi_long, epigenetic.SECTION_IMMUNE, unit="ratio")
+            ])
+            fractions = immune[(immune["form"] == epigenetic.FORM_ABSOLUTE) & (immune["unit"] == "%")]
+            main_fractions = fractions[fractions["subsection"] == ""]
+            detail_fractions = fractions[fractions["subsection"] != ""]
+            comp_cols = st.columns(2)
+            for col, frame, title in (
+                (comp_cols[0], main_fractions, "Cell composition"),
+                (comp_cols[1], detail_fractions, "Detailed breakdown"),
+            ):
+                if frame.empty:
+                    continue
+                order = frame.sort_values("row_order")["metric"].drop_duplicates().tolist()
+                wide = frame.pivot_table(index="Date", columns="metric", values="Value", aggfunc="mean").reindex(columns=order)
+                with col:
+                    st.markdown(
+                        f"<div class='chart-card-title'>{html.escape(title)}</div>"
+                        "<div class='chart-card-meta'>Absolute cell fractions · reports up to January 2025</div>",
+                        unsafe_allow_html=True,
+                    )
+                    render_chart(plot_epi_composition(wide), use_container_width=True, config={"displayModeBar": False})
+            centiles = immune[immune["form"] == epigenetic.FORM_CENTILE]
+            if not centiles.empty:
+                order = epigenetic.metrics_in(epi_long, epigenetic.SECTION_IMMUNE, form=epigenetic.FORM_CENTILE)
+                values = centiles.pivot_table(index="metric", columns="Date", values="Value", aggfunc="mean")
+                values = values.reindex([m for m in order if m in values.index])
+                st.markdown(
+                    "<div class='chart-card-title'>Immune centiles</div>"
+                    "<div class='chart-card-meta'>Population centiles · reports from May 2025 · no optimal direction is given for these, so colour only tracks magnitude</div>",
+                    unsafe_allow_html=True,
+                )
+                render_chart(plot_epi_heatmap(values, None), use_container_width=True, config={"displayModeBar": False})
+
+        # ---- DNAm proxies ----
+        render_section_header(
+            "DNAm Proxy Biomarkers",
+            "Methylation-predicted inflammation markers, as population centiles (lower is better).",
+            "Inflammation",
+        )
+        render_epi_chart_grid([
+            build_epi_chart(data, epigenetic.SECTION_DNAM, metric, view, **chart_kwargs)
+            for metric in epigenetic.metrics_in(epi_long, epigenetic.SECTION_DNAM)
+        ], ncols=2)
+
+    # ---- TruHealth ----
+    render_section_header(
+        "TruHealth Biomarkers",
+        "Percentile scores from the TruHealth panel: category overviews, the markers flagged in the latest report, and the full table.",
+        "Percentile panel",
+    )
+    if tru_long.empty:
+        st.caption(f"Sheet '{epigenetic.TRUHEALTH_SHEET}' was not found or has no dated columns.")
+    elif tru_data.empty:
+        st.caption("No TruHealth reports fall inside the selected time window.")
+    else:
+        categories = tru_data[tru_data["group"] == epigenetic.TRUHEALTH_CATEGORY]
+        if not categories.empty:
+            order = categories.sort_values("row_order")["marker"].drop_duplicates().tolist()
+            values = categories.pivot_table(index="marker", columns="Date", values="Value", aggfunc="mean").reindex(order)
+            st.markdown(
+                "<div class='chart-card-title'>Category scores</div>"
+                "<div class='chart-card-meta'>Percentiles · higher is better for every category score</div>",
+                unsafe_allow_html=True,
+            )
+            render_chart(
+                plot_epi_heatmap(values, values / 100.0, date_fmt="%d %b %Y", value_label="Percentile"),
+                use_container_width=True, config={"displayModeBar": False},
+            )
+
+        tru_selected = tru_options if show_all_markers else tru_flagged
+        latest_report = format_display_date(tru_latest["Date"].max()) if not tru_latest.empty else ""
+        selection_note = (
+            f"All {len(tru_options)} markers, in sheet order"
+            if show_all_markers
+            else f"{len(tru_flagged)} of {len(tru_options)} markers flagged High, Low or Suboptimal in the {latest_report} report · sidebar toggle shows all"
+        )
+        st.markdown(f"<div class='chart-card-meta'>{html.escape(selection_note)}</div>", unsafe_allow_html=True)
+        tru_cards = []
+        for marker in tru_selected:
+            rows = tru_data[tru_data["marker"] == marker]
+            if rows.empty:
+                continue
+            latest = rows.loc[rows["Date"].idxmax()]
+            lower, upper = latest.get("lower"), latest.get("upper")
+            status = str(latest.get("status") or "").strip()
+            if pd.notna(lower) and pd.notna(upper):
+                fig = plot_epi_series(
+                    rows, marker, "Percentile", centile_direction="", value_fmt=".0f",
+                    reference_band=(float(lower), float(upper), BAND_FILL_COLOR), shade_outside_band=True,
+                    date_window=window, height=280, sample_notes=tru_notes,
+                )
+                window_text = f" · optimal {lower:.0f}–{upper:.0f}"
+            else:
+                direction = "Higher" if latest["group"] == epigenetic.TRUHEALTH_CATEGORY else ""
+                fig = plot_epi_series(
+                    rows, marker, "Percentile", centile_direction=direction, value_fmt=".0f",
+                    date_window=window, height=280, sample_notes=tru_notes,
+                )
+                window_text = ""
+            meta = (
+                f"Percentile · Latest {latest['Value']:.0f} ({status or 'in range'}) · "
+                f"{format_display_date(latest['Date'])}{window_text}"
+            )
+            tru_cards.append((marker, meta, fig))
+        if tru_cards:
+            render_epi_chart_grid(tru_cards)
+        else:
+            st.caption('Nothing is flagged in the latest report. Turn on "Show all TruHealth markers" in the sidebar to chart the full panel.')
+
+        report_dates = sorted(tru_data["Date"].unique())
+        table = tru_data.pivot_table(index="marker", columns="Date", values="Value", aggfunc="mean")
+        table = table.reindex(tru_latest["marker"]).reindex(columns=report_dates)
+        table.columns = [format_display_date(d) for d in report_dates]
+        latest_by_marker = tru_latest.set_index("marker")
+        table.insert(0, "Group", latest_by_marker["group"].reindex(table.index))
+        table["Change"] = (latest_by_marker["Value"] - latest_by_marker["PrevValue"]).reindex(table.index)
+        table["Status"] = latest_by_marker["status"].reindex(table.index).fillna("")
+        table["Optimal"] = [
+            f"{lo:.0f}–{hi:.0f}" if pd.notna(lo) and pd.notna(hi) else ""
+            for lo, hi in zip(latest_by_marker["lower"].reindex(table.index), latest_by_marker["upper"].reindex(table.index))
+        ]
+        table = table.reset_index().rename(columns={"marker": "Marker"})
+        # Flagged markers first (High / Low, then Suboptimal), sheet order within.
+        status_rank = table["Status"].str.lower().map({"high": 0, "low": 0, "suboptimal": 1}).fillna(2)
+        table = table.iloc[status_rank.argsort(kind="stable")].reset_index(drop=True)
+        st.markdown(
+            "<div class='chart-card-title'>All markers</div>"
+            "<div class='chart-card-meta'>Status and change are from the latest report; markers flagged High, Low or Suboptimal are listed first</div>",
+            unsafe_allow_html=True,
+        )
+        st.dataframe(
+            table, use_container_width=True, hide_index=True, height=520,
+            column_config={
+                **{label: st.column_config.NumberColumn(label, format="%.0f") for label in table.columns[2:2 + len(report_dates)]},
+                "Change": st.column_config.NumberColumn("Change", format="%+.0f"),
+            },
+        )
+
+    # ---- Sample log ----
+    render_section_header(
+        "Sample Log",
+        "Collection circumstances recorded alongside each sample; they also appear in the chart hovers.",
+        "Context",
+    )
+    log_dates = sorted(set(sample_notes) | set(tru_notes), reverse=True)
+    if log_dates:
+        log = pd.DataFrame({
+            "Date": [format_display_date(d) for d in log_dates],
+            "Epigenetic sample": [sample_notes.get(d, "") for d in log_dates],
+            "TruHealth report": [tru_notes.get(d, "") for d in log_dates],
+        })
+        st.dataframe(log, use_container_width=True, hide_index=True)
+    else:
+        st.caption("No sample collection notes were found.")
+
+    if PRINT_MODE:
+        return
+    render_section_header(
+        "Export",
+        "Print this view, or download the current epigenetic data as a filtered dataset.",
+        "Share & archive",
+    )
+    colP, colB = st.columns(2)
+    with colP:
+        render_print_button()
+    with colB:
+        st.caption("Export current filtered dataset (CSV)")
+        csv = data.sort_values(["row_order", "form", "Date"]).to_csv(index=False).encode("utf-8")
+        st.download_button("Download CSV", data=csv, file_name="epigenetic_data.csv", mime="text/csv")
+
+
 def page_settings():
     """Settings page for data sources and Fitbit configuration."""
     render_page_hero(
@@ -3752,16 +4648,17 @@ def page_settings():
     config = fitbit_client.load_config()
     fitbit_connected = fitbit_client.has_valid_token()
 
-    render_section_header("Data Source", "Technical configuration for the Google Sheets source used by the blood panel dashboard.", "Sources")
+    render_section_header("Data Source", "Technical configuration for the Google Sheets sources used by the Blood Panel, Dexa and Epigenetic Clocks dashboards.", "Sources")
     if os.path.exists(local_key_path):
         st.success("Local Google Sheets key detected.")
         st.caption(f"Using local key: `{local_key_path}`")
     else:
         st.info("No local Google Sheets key detected. The blood panel page will prompt for a service account file.")
     st.caption(f"Default spreadsheet ID: `{spreadsheet_id}`")
+    st.caption(f"Epigenetic clocks spreadsheet ID: `{EPI_SHEET_ID}`")
     if st.button("Force refresh Google Sheets"):
         load_from_gsheets.clear()
-        st.success("Google Sheets cache cleared. The next Blood Panel visit will fetch fresh data.")
+        st.success("Google Sheets cache cleared. The next Blood Panel, Dexa or Epigenetic Clocks visit will fetch fresh data.")
 
     render_section_header("Hevy", "Connection health and maintenance controls for the Lifts page.", "Sources")
     hevy_key_path = hevy_client.get_api_key_path()
@@ -4910,7 +5807,7 @@ with st.sidebar:
 
     page = st.radio(
         "Navigation",
-        ["Lifts", "Fitbit Data", "Blood Panel", "Dexa", "Settings"],
+        ["Lifts", "Fitbit Data", "Blood Panel", "Dexa", "Epigenetic Clocks", "Settings"],
         label_visibility="collapsed",
         key="page_nav",
     )
@@ -4956,6 +5853,8 @@ with page_root.container():
         page_fitbit_data()
     elif page == "Lifts":
         page_lifts()
+    elif page == "Epigenetic Clocks":
+        page_epigenetic()
     elif page == "Settings":
         page_settings()
 
