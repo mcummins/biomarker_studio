@@ -58,6 +58,10 @@ reaching it in July 2026, so device data now comes from three places:
   `google_health_login.py`, then run it. Before the app switches over, run
   `compare_fitbit_google.py` to diff both APIs day-by-day
   (report: `archive/fitbit_vs_google_report.md`).
+- **Nutrition** — Cronometer has no API, so the daily nutrition summary is
+  exported by hand as CSV into `cronometer_data/` (tracked in git). Every
+  CSV there is merged by date, newest file winning on overlap; the Diet
+  section of the Fitbit Data page reads it via `cronometer_client.py`.
 - **Frozen archive** — `archive/fitbit_cache_2026-08-17/` is a complete
   snapshot of everything the Fitbit Web API ever returned (through the
   sunset). Do not delete; it is the only copy of pre-Garmin weight and any

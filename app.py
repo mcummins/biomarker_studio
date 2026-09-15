@@ -22,6 +22,7 @@ import garmin_client
 import google_health_client
 import hevy_client
 import epigenetic
+import cronometer_client
 import strength_standards
 
 # -----------------------------
@@ -212,6 +213,16 @@ EPI_COMPOSITION_COLORS = [
     "#E07A5F", "#81B29A", "#F2CC8F", "#7EB8DA", "#9C6B5E", "#4F8F73",
     "#D4C5B5", "#A991FF", "#F1B07B", "#BED8C7", "#B08968", "#3D405B",
 ]
+# -----------------------------
+# Diet (Cronometer exports)
+# -----------------------------
+# Protein target while training, in g per kg bodyweight per day: the
+# 1.6–2.2 range that resistance-training meta-analyses converge on. Shaded
+# green on the protein chart, with below-floor amber.
+PROTEIN_TARGET_G_PER_KG = (1.6, 2.2)
+DIET_INTAKE_COLOR = "#E07A5F"
+DIET_EXPENDITURE_COLOR = "#7EB8DA"
+DIET_MACRO_COLORS = {"Protein": "#81B29A", "Carbs": "#F2CC8F", "Fat": "#C97B63", "Alcohol": "#A991FF"}
 PLOTLY_ZOOM_SYNC = components.declare_component(
     "plotly_zoom_sync",
     path=str(Path(__file__).parent / "streamlit_components" / "plotly_zoom_sync"),
@@ -1849,6 +1860,192 @@ def render_epi_headline_cards(
         })
 
     render_dexa_summary_card_grid([card for card in cards if card is not None])
+
+
+# ---------------------------------------------------------------------------
+# Diet (Cronometer) helpers
+# ---------------------------------------------------------------------------
+
+@st.cache_data(show_spinner=False)
+def load_cronometer_daily(signature) -> pd.DataFrame:
+    """Merged Cronometer exports; ``signature`` busts the cache when a new
+    export lands in cronometer_data/."""
+    return cronometer_client.load_daily_summary()
+
+
+def daily_bodyweight_series(weight_df: pd.DataFrame) -> pd.Series:
+    """Smoothed bodyweight for every calendar day, for per-kg normalisation:
+    the 7-day centred mean of weigh-ins, with gaps of up to 30 days
+    interpolated."""
+    if weight_df.empty or "Weight" not in weight_df.columns:
+        return pd.Series(dtype=float)
+    weigh_ins = weight_df.dropna(subset=["Weight"]).copy()
+    if weigh_ins.empty:
+        return pd.Series(dtype=float)
+    weigh_ins["Date"] = pd.to_datetime(weigh_ins["Date"]).dt.normalize()
+    daily = weigh_ins.groupby("Date")["Weight"].mean()
+    daily = daily.reindex(pd.date_range(daily.index.min(), daily.index.max()))
+    daily = daily.interpolate(limit=30, limit_direction="both")
+    return daily.rolling(7, min_periods=1, center=True).mean()
+
+
+def build_diet_frame(diet_df: pd.DataFrame, weight_df: pd.DataFrame, activity_df: pd.DataFrame) -> pd.DataFrame:
+    """Logged days with bodyweight-normalised protein and the day's energy
+    balance against the wearable's expenditure estimate."""
+    data = diet_df.copy()
+    data["Date"] = pd.to_datetime(data["Date"]).dt.normalize()
+    bodyweight = daily_bodyweight_series(weight_df)
+    data["Bodyweight"] = data["Date"].map(bodyweight) if not bodyweight.empty else np.nan
+    data["ProteinPerKg"] = data["Protein"] / data["Bodyweight"]
+    data["Expenditure"] = np.nan
+    if not activity_df.empty and "Calories" in activity_df.columns:
+        expenditure = activity_df.dropna(subset=["Calories"]).copy()
+        expenditure["Date"] = pd.to_datetime(expenditure["Date"]).dt.normalize()
+        # Today's device total is still accumulating; leave it out.
+        expenditure = expenditure[expenditure["Date"] < pd.Timestamp.today().normalize()]
+        data["Expenditure"] = data["Date"].map(expenditure.groupby("Date")["Calories"].mean())
+    data["Balance"] = data["Calories"] - data["Expenditure"]
+    return data.sort_values("Date").reset_index(drop=True)
+
+
+def _diet_window(df: pd.DataFrame, date_window) -> pd.DataFrame:
+    if date_window is None:
+        return df
+    start = pd.to_datetime(date_window[0])
+    end = pd.to_datetime(date_window[1]) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+    return df[(df["Date"] >= start) & (df["Date"] <= end)]
+
+
+def _diet_chart_title(fig: go.Figure, title: str) -> None:
+    fig.update_layout(title=dict(text=title, x=0, xanchor="left", y=0.97, font=dict(size=14, color="#18322f")))
+
+
+def add_expenditure_overlay(fig: go.Figure, activity_df: pd.DataFrame, date_window=None) -> go.Figure:
+    """Overlay the wearable's 7-day-average expenditure on an intake chart so
+    the gap between the lines is the running deficit or surplus."""
+    if activity_df.empty or "Calories" not in activity_df.columns:
+        return fig
+    expenditure = activity_df.dropna(subset=["Calories"]).copy()
+    expenditure["Date"] = pd.to_datetime(expenditure["Date"]).dt.normalize()
+    expenditure = expenditure[expenditure["Date"] < pd.Timestamp.today().normalize()].sort_values("Date")
+    if len(expenditure) < 3:
+        return fig
+    rolling = (
+        expenditure.set_index("Date")["Calories"]
+        .rolling("7D", min_periods=3, center=True)
+        .mean()
+        .reset_index()
+    )
+    rolling = _diet_window(rolling, date_window)
+    fig.add_trace(go.Scatter(
+        x=rolling["Date"], y=rolling["Calories"], mode="lines", name="Expenditure (device, 7-day avg)",
+        line=dict(color=DIET_EXPENDITURE_COLOR, width=2),
+        hovertemplate="<b>Expenditure, 7-day avg</b><br>%{x|%Y-%m-%d}<br>kcal: %{y:.0f}<extra></extra>",
+    ))
+    fig.update_layout(
+        showlegend=True,
+        legend=dict(x=1, xanchor="right", y=1.0, yanchor="top", bgcolor="rgba(255,255,255,0.65)", font=dict(size=10)),
+    )
+    return fig
+
+
+def plot_diet_balance(df: pd.DataFrame, date_window=None, height: int = 340) -> go.Figure:
+    """Daily calories eaten minus the device's expenditure estimate: deficit
+    days green, surplus days amber, with a 7-day average line."""
+    fig = go.Figure()
+    data = df.dropna(subset=["Balance"]).sort_values("Date")
+    if data.empty:
+        return fig
+    visible = _diet_window(data, date_window)
+    if visible.empty:
+        return fig
+    colors = ["#81B29A" if value <= 0 else "#F2CC8F" for value in visible["Balance"]]
+    fig.add_trace(go.Bar(
+        x=visible["Date"], y=visible["Balance"], name="Daily balance",
+        marker=dict(color=colors, line=dict(width=0)),
+        hovertemplate="<b>Balance</b><br>%{x|%Y-%m-%d}<br>%{y:+.0f} kcal<extra></extra>",
+    ))
+    if len(data) >= 7:
+        rolling = (
+            data.set_index("Date")["Balance"]
+            .rolling("7D", min_periods=3, center=True)
+            .mean()
+            .reset_index()
+        )
+        rolling = _diet_window(rolling, date_window).copy()
+        # Break the line across logging gaps instead of drawing a diagonal
+        # between clusters of logged days.
+        gap = rolling["Date"].diff() > pd.Timedelta(days=7)
+        rolling.loc[gap, "Balance"] = np.nan
+        fig.add_trace(go.Scatter(
+            x=rolling["Date"], y=rolling["Balance"], mode="lines", name="7-day avg", connectgaps=False,
+            line=dict(color="#4F5D5A", width=2, dash="dash"),
+            hovertemplate="<b>7-day avg</b><br>%{x|%Y-%m-%d}<br>%{y:+.0f} kcal<extra></extra>",
+        ))
+    fig.add_hline(y=0, line_dash="dot", line_color=EPI_CALENDAR_COLOR)
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=40, b=40), height=height, bargap=0.25,
+        xaxis_title="Date", yaxis_title="kcal vs expenditure",
+    )
+    _diet_chart_title(fig, "Energy Balance")
+    if date_window is not None:
+        fig.update_xaxes(range=[pd.to_datetime(date_window[0]), pd.to_datetime(date_window[1])])
+    apply_warm_theme(fig)
+    return fig
+
+
+def add_protein_target_band(fig: go.Figure, df: pd.DataFrame) -> go.Figure:
+    """Shade the protein target (green) and below-floor (amber) on a g/kg chart."""
+    floor, ceiling = PROTEIN_TARGET_G_PER_KG
+    values = df["ProteinPerKg"].dropna()
+    y_max = max(ceiling * 1.2, float(values.max()) * 1.08 if not values.empty else 0.0)
+    fig.add_hrect(y0=0, y1=floor, fillcolor=BAND_OVER_COLOR, line_width=0, layer="below")
+    fig.add_hrect(y0=floor, y1=ceiling, fillcolor=BAND_FILL_COLOR, line_width=0, layer="below")
+    fig.add_hline(y=floor, line_dash="dot", line_color=EPI_CALENDAR_COLOR)
+    fig.add_hline(y=ceiling, line_dash="dot", line_color=EPI_CALENDAR_COLOR)
+    fig.update_yaxes(range=[0, y_max])
+    return fig
+
+
+def plot_diet_macros(df: pd.DataFrame, date_window=None, height: int = 340) -> go.Figure:
+    """Weekly average calories from protein, carbs, fat and alcohol, stacked."""
+    fig = go.Figure()
+    if df.empty:
+        return fig
+    kcal = cronometer_client.macro_kcal(df)
+    kcal["Week"] = pd.to_datetime(kcal["Date"]).dt.to_period("W-SUN").dt.start_time
+    macros = [m for m in cronometer_client.KCAL_PER_GRAM if m in kcal.columns]
+    weekly = kcal.groupby("Week")[macros].mean()
+    logged_days = kcal.groupby("Week").size()
+    if date_window is not None:
+        start = pd.to_datetime(date_window[0]) - pd.Timedelta(days=6)
+        end = pd.to_datetime(date_window[1])
+        weekly = weekly[(weekly.index >= start) & (weekly.index <= end)]
+    if weekly.empty:
+        return fig
+    for macro in macros:
+        if weekly[macro].fillna(0).eq(0).all():
+            continue
+        fig.add_trace(go.Bar(
+            x=weekly.index, y=weekly[macro], name=macro,
+            marker=dict(color=DIET_MACRO_COLORS.get(macro, "#D4C5B5"), line=dict(width=0)),
+            customdata=logged_days.reindex(weekly.index).values,
+            hovertemplate=(
+                f"<b>{macro}</b><br>week of %{{x|%d %b %Y}}<br>"
+                "%{y:.0f} kcal/day · %{customdata} days logged<extra></extra>"
+            ),
+        ))
+    apply_warm_theme(fig)
+    fig.update_layout(
+        barmode="stack", margin=dict(l=10, r=10, t=40, b=40), height=height, bargap=0.2,
+        xaxis_title="Week", yaxis_title="kcal / day",
+        showlegend=True,
+        legend=dict(x=1, xanchor="right", y=1.0, yanchor="top", bgcolor="rgba(255,255,255,0.65)", font=dict(size=10)),
+    )
+    _diet_chart_title(fig, "Macro Split (weekly average)")
+    return fig
+
+
 def plot_lift_timeseries(
     df: pd.DataFrame,
     title: str,
@@ -3802,6 +3999,109 @@ def page_fitbit_data():
         st.info("No weight data available.")
 
     # ==================================================================
+    # DIET SECTION (Cronometer exports)
+    # ==================================================================
+    render_section_header("Diet", "", "Nutrition")
+    diet_all = load_cronometer_daily(cronometer_client.signature())
+    if diet_all.empty:
+        st.info(
+            "No Cronometer exports found. Export the daily nutrition summary from "
+            "Cronometer and save the CSV into `cronometer_data/`."
+        )
+        diet_df = diet_all
+    else:
+        diet_chart_df = build_diet_frame(diet_all, weight_chart_df, activity_chart_df)
+        if fitbit_time_start is not None:
+            diet_df = diet_chart_df[
+                (diet_chart_df["Date"] >= fitbit_time_start) & (diet_chart_df["Date"] <= end_inclusive)
+            ].copy()
+            window_days = (fitbit_time_end - fitbit_time_start).days + 1
+        else:
+            diet_df = diet_chart_df.copy()
+            window_days = (diet_df["Date"].max() - diet_df["Date"].min()).days + 1
+        if diet_df.empty:
+            st.info("No logged days fall inside the selected time window.")
+        else:
+            diet_window = (fitbit_time_start, fitbit_time_end) if fitbit_time_start is not None else None
+            n1, n2, n3, n4 = st.columns(4)
+            with n1:
+                render_fitbit_metric_stack(
+                    diet_df,
+                    "Calories",
+                    "Average Intake",
+                    "Intake Trend",
+                    lambda v: format_fitbit_metric_value(v, "kcal", 0),
+                    lambda v: format_fitbit_metric_value(v, "kcal / month", 0, signed=True),
+                    lambda v: format_fitbit_metric_value(v, "kcal / year", 0, signed=True),
+                )
+            with n2:
+                balance = diet_df["Balance"].dropna()
+                if balance.empty:
+                    render_metric_card("Average Balance", "—", "Needs device expenditure data")
+                else:
+                    render_metric_card(
+                        "Average Balance",
+                        format_fitbit_metric_value(balance.mean(), "kcal / day", 0, signed=True),
+                        f"vs device expenditure · latest {balance.iloc[-1]:+,.0f}",
+                    )
+            with n3:
+                per_kg = diet_df["ProteinPerKg"].dropna()
+                grams = diet_df["Protein"].dropna()
+                floor, ceiling = PROTEIN_TARGET_G_PER_KG
+                if per_kg.empty:
+                    render_metric_card(
+                        "Average Protein",
+                        format_fitbit_metric_value(grams.mean(), "g", 0) if not grams.empty else "—",
+                        "Needs bodyweight for g/kg",
+                    )
+                else:
+                    render_metric_card(
+                        "Average Protein",
+                        f"{per_kg.mean():.2f} g/kg",
+                        f"{grams.mean():,.0f} g/day · target {floor}–{ceiling} g/kg",
+                    )
+            with n4:
+                logged = int(diet_df["Calories"].notna().sum())
+                render_metric_card(
+                    "Days Logged",
+                    f"{logged} of {window_days}",
+                    f"{100.0 * logged / max(window_days, 1):.0f}% of days in view · unlogged days are left blank, not zero",
+                )
+
+            st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True)
+
+            fig_intake = plot_fitbit_timeseries(
+                diet_chart_df, "Calories", "Calories Eaten", "kcal", color=DIET_INTAKE_COLOR,
+                show_trend=show_trend, show_primary_series=show_primary_fitbit_series,
+                date_window=diet_window, show_title=True,
+            )
+            add_expenditure_overlay(fig_intake, activity_chart_df, diet_window)
+            render_chart(fig_intake, use_container_width=True, config={"displayModeBar": False})
+
+            fig_balance = plot_diet_balance(diet_chart_df, diet_window)
+            if fig_balance.data:
+                render_chart(fig_balance, use_container_width=True, config={"displayModeBar": False})
+
+            if diet_chart_df["ProteinPerKg"].notna().any():
+                fig_protein = plot_fitbit_timeseries(
+                    diet_chart_df, "ProteinPerKg", "Protein", "g / kg bodyweight", color="#81B29A",
+                    show_trend=show_trend, show_primary_series=show_primary_fitbit_series,
+                    date_window=diet_window, show_title=True,
+                )
+                add_protein_target_band(fig_protein, diet_chart_df)
+                render_chart(fig_protein, use_container_width=True, config={"displayModeBar": False})
+
+            fig_macros = plot_diet_macros(diet_chart_df, diet_window)
+            if fig_macros.data:
+                render_chart(fig_macros, use_container_width=True, config={"displayModeBar": False})
+
+        st.caption(
+            f"Cronometer export covers logged days up to "
+            f"{format_display_date(diet_chart_df['Date'].max())}. Drop a newer export into "
+            "`cronometer_data/` to extend it."
+        )
+
+    # ==================================================================
     # HEALTH METRICS SECTION
     # ==================================================================
     render_section_header("Health Metrics", "", "Recovery")
@@ -4039,7 +4339,7 @@ def page_fitbit_data():
     # RAW DATA
     # ==================================================================
     render_section_header("Raw Data", "", "Audit trail")
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Weight", "HRV", "RHR", "Breathing Rate", "Sleep", "Activity"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["Weight", "HRV", "RHR", "Breathing Rate", "Sleep", "Activity", "Diet"])
     with tab1:
         if not weight_df.empty:
             st.dataframe(weight_df.sort_values("Date", ascending=False), use_container_width=True, hide_index=True)
@@ -4068,6 +4368,11 @@ def page_fitbit_data():
     with tab6:
         if not activity_df.empty:
             st.dataframe(activity_df.sort_values("Date", ascending=False), use_container_width=True, hide_index=True)
+        else:
+            st.caption("No data.")
+    with tab7:
+        if not diet_df.empty:
+            st.dataframe(diet_df.sort_values("Date", ascending=False), use_container_width=True, hide_index=True)
         else:
             st.caption("No data.")
 
@@ -4659,6 +4964,21 @@ def page_settings():
     if st.button("Force refresh Google Sheets"):
         load_from_gsheets.clear()
         st.success("Google Sheets cache cleared. The next Blood Panel, Dexa or Epigenetic Clocks visit will fetch fresh data.")
+
+    render_section_header("Cronometer", "Hand-exported nutrition data behind the Diet section of the Fitbit Data page.", "Sources")
+    cronometer_exports = cronometer_client.list_exports()
+    if cronometer_exports:
+        latest_logged = cronometer_client.latest_logged_date()
+        st.success(
+            f"{len(cronometer_exports)} export file(s) in `cronometer_data/`; "
+            f"logged days up to {format_display_date(latest_logged)}."
+        )
+    else:
+        st.info("No Cronometer exports found in `cronometer_data/`.")
+    st.caption(
+        "Cronometer has no API. Export the daily nutrition summary as CSV and save it into "
+        "`cronometer_data/`; every CSV there is merged by date, and the newest file wins where they overlap."
+    )
 
     render_section_header("Hevy", "Connection health and maintenance controls for the Lifts page.", "Sources")
     hevy_key_path = hevy_client.get_api_key_path()
